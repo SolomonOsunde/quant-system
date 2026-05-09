@@ -1,6 +1,7 @@
 package com.quant.kafka;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quant.QuantConfig;
 import com.quant.ingestion.TickData;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.clients.consumer.*;
@@ -40,7 +41,7 @@ public class QuantKafkaProducer implements AutoCloseable {
     public QuantKafkaProducer() {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
-            System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"));
+            QuantConfig.get("kafka.bootstrap.servers", "localhost:9092"));
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,   StringSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         props.put(ProducerConfig.ACKS_CONFIG, "1");                    // balance speed/durability
@@ -99,7 +100,7 @@ public class QuantKafkaProducer implements AutoCloseable {
     public KafkaConsumer<String, String> createSignalConsumer(String groupId) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
-            System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"));
+            QuantConfig.get("kafka.bootstrap.servers", "localhost:9092"));
         props.put(ConsumerConfig.GROUP_ID_CONFIG,              groupId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,   StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());

@@ -36,8 +36,8 @@ class MLEnsembleModel:
     """
 
     MODEL_PATH = "models/ensemble.pkl"
-    MIN_TRAIN_SAMPLES = 500
-    RETRAIN_EVERY_N   = 1000   # retrain after N new samples
+    MIN_TRAIN_SAMPLES = 150    # lowered: first training after ~2-3 min of live data
+    RETRAIN_EVERY_N   = 200    # retrain frequently so model stays current
 
     def __init__(self):
         self._model: Optional[Pipeline] = None

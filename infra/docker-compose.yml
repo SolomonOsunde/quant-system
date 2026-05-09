@@ -1,6 +1,6 @@
-version: '3.8'
-
 services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -10,32 +10,51 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    # No health check — the image has no nc/curl/bash tools.
+    # Kafka has built-in Zookeeper retry logic so the start_period below
+    # gives Zookeeper enough time to be ready before Kafka checks itself.
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: quant-kafka
     depends_on:
-      - zookeeper
+      - zookeeper   # service_started (default) — Kafka retries ZK internally
     ports:
-      - "9092:9092"
+      - "9092:9092"     # host access
+      # port 29092 is internal-only — no need to expose it
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+
+      # Two listeners:
+      #   EXTERNAL → host machines reach Kafka via localhost:9092
+      #   INTERNAL → containers reach Kafka via kafka:29092
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 24
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 45s   # gives Zookeeper time to be ready before first check
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: quant-kafka-ui
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: quant-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092   # internal listener
 
   timescaledb:
     image: timescale/timescaledb:latest-pg15
@@ -49,6 +68,11 @@ services:
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quant -d quantdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -56,6 +80,56 @@ services:
     ports:
       - "6379:6379"
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Application services ──────────────────────────────────────────────────
+
+  quant-java:
+    build:
+      context: ../quant-java
+      dockerfile: Dockerfile
+    container_name: quant-java
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # internal listener
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Optional broker API keys — set in .env or export before running
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      OANDA_API_KEY: ${OANDA_API_KEY:-}
+      OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
+    restart: unless-stopped
+
+  quant-python:
+    build:
+      context: ../quant-python
+      dockerfile: Dockerfile
+    container_name: quant-python
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # internal listener
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8050:8050"    # Dash dashboard
+    volumes:
+      - ml_models:/app/models   # persist the trained ML model across restarts
+    restart: unless-stopped
 
 volumes:
   timescale_data:
+  ml_models:

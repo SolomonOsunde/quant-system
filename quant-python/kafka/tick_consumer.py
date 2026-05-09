@@ -21,7 +21,6 @@ class TickConsumer:
             "group.id":           "quant-python-signal-engine",
             "auto.offset.reset":  "latest",
             "enable.auto.commit": True,
-            "max.poll.records":   200,
         })
         self._consumer.subscribe([config.TOPIC_TICKS])
         self._tick_windows: dict[str, deque] = defaultdict(

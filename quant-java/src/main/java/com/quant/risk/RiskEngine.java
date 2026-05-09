@@ -1,5 +1,6 @@
 package com.quant.risk;
 
+import com.quant.QuantConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,20 +11,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Pre-trade risk engine — all checks run synchronously before order submission.
+ * Limits are loaded from application.properties (env vars take precedence).
  * Kill switch halts all trading immediately.
  */
 public class RiskEngine {
 
     private static final Logger log = LoggerFactory.getLogger(RiskEngine.class);
 
-    // --- Risk limits (load from config in production) ---
-    private static final double MAX_POSITION_USD   = 100_000;
-    private static final double MAX_ORDER_USD      = 10_000;
-    private static final double MAX_DAILY_LOSS_USD = 5_000;
-    private static final int    MAX_ORDERS_PER_MIN = 60;
-    private static final double MAX_SPREAD_BPS     = 5.0;
+    // Risk limits — loaded from config at construction time
+    private final double maxPositionUsd;
+    private final double maxOrderUsd;
+    private final double maxDailyLossUsd;
+    private final int    maxOrdersPerMin;
+    private final double maxSpreadBps;
 
-    // --- State ---
+    // State
     private final AtomicBoolean killSwitch    = new AtomicBoolean(false);
     private final AtomicInteger ordersThisMin = new AtomicInteger(0);
     private volatile double dailyPnl          = 0.0;
@@ -31,11 +33,29 @@ public class RiskEngine {
 
     private final Map<String, Double> positions = new ConcurrentHashMap<>();
 
-    public enum CheckResult { APPROVED, REJECTED_KILL_SWITCH, REJECTED_POSITION_LIMIT,
-        REJECTED_ORDER_SIZE, REJECTED_DAILY_LOSS, REJECTED_RATE_LIMIT, REJECTED_SPREAD }
+    public enum CheckResult {
+        APPROVED,
+        REJECTED_KILL_SWITCH,
+        REJECTED_POSITION_LIMIT,
+        REJECTED_ORDER_SIZE,
+        REJECTED_DAILY_LOSS,
+        REJECTED_RATE_LIMIT,
+        REJECTED_SPREAD
+    }
+
+    public RiskEngine() {
+        this.maxPositionUsd  = QuantConfig.getDouble("risk.max.position.usd",    100_000);
+        this.maxOrderUsd     = QuantConfig.getDouble("risk.max.order.usd",        10_000);
+        this.maxDailyLossUsd = QuantConfig.getDouble("risk.max.daily.loss.usd",    5_000);
+        this.maxOrdersPerMin = QuantConfig.getInt("risk.max.orders.per.minute",       60);
+        this.maxSpreadBps    = QuantConfig.getDouble("risk.max.spread.bps",          5.0);
+
+        log.info("RiskEngine limits — position=${} order=${} dailyLoss=${} rate={}/min spread={}bps",
+            maxPositionUsd, maxOrderUsd, maxDailyLossUsd, maxOrdersPerMin, maxSpreadBps);
+    }
 
     /**
-     * Run all pre-trade checks. Returns APPROVED if trade can proceed.
+     * Run all pre-trade checks. Returns APPROVED if the trade can proceed.
      */
     public CheckResult check(String symbol, String side, double qty,
                               double price, double spreadBps) {
@@ -46,33 +66,34 @@ public class RiskEngine {
         }
 
         double orderValueUsd = qty * price;
-        if (orderValueUsd > MAX_ORDER_USD) {
-            log.warn("Order size ${} exceeds limit ${}", orderValueUsd, MAX_ORDER_USD);
+        if (orderValueUsd > maxOrderUsd) {
+            log.warn("Order size ${} exceeds limit ${}", orderValueUsd, maxOrderUsd);
             return CheckResult.REJECTED_ORDER_SIZE;
         }
 
         double currentPos = positions.getOrDefault(symbol, 0.0);
-        double newPos     = "BUY".equals(side) ? currentPos + orderValueUsd
-                                               : currentPos - orderValueUsd;
-        if (Math.abs(newPos) > MAX_POSITION_USD) {
+        double newPos     = "BUY".equals(side)
+            ? currentPos + orderValueUsd
+            : currentPos - orderValueUsd;
+        if (Math.abs(newPos) > maxPositionUsd) {
             log.warn("Position limit breach for {} — current={} new={}", symbol, currentPos, newPos);
             return CheckResult.REJECTED_POSITION_LIMIT;
         }
 
-        if (dailyPnl < -MAX_DAILY_LOSS_USD) {
+        if (dailyPnl < -maxDailyLossUsd) {
             log.error("Daily loss limit reached: ${} — all trading halted.", dailyPnl);
             killSwitch.set(true);
             return CheckResult.REJECTED_DAILY_LOSS;
         }
 
         resetRateLimiterIfNeeded();
-        if (ordersThisMin.incrementAndGet() > MAX_ORDERS_PER_MIN) {
-            log.warn("Order rate limit hit ({}/min)", MAX_ORDERS_PER_MIN);
+        if (ordersThisMin.incrementAndGet() > maxOrdersPerMin) {
+            log.warn("Order rate limit hit ({}/min)", maxOrdersPerMin);
             return CheckResult.REJECTED_RATE_LIMIT;
         }
 
-        if (spreadBps > MAX_SPREAD_BPS) {
-            log.warn("Spread too wide for {}: {:.1f} bps > {:.1f}", symbol, spreadBps, MAX_SPREAD_BPS);
+        if (spreadBps > maxSpreadBps) {
+            log.warn("Spread too wide for {}: {:.1f} bps > {:.1f}", symbol, spreadBps, maxSpreadBps);
             return CheckResult.REJECTED_SPREAD;
         }
 
@@ -86,7 +107,7 @@ public class RiskEngine {
 
     public void updatePnl(double pnlDelta) {
         dailyPnl += pnlDelta;
-        if (dailyPnl < -MAX_DAILY_LOSS_USD) {
+        if (dailyPnl < -maxDailyLossUsd) {
             log.error("DAILY LOSS LIMIT BREACHED: ${} — activating kill switch.", dailyPnl);
             killSwitch.set(true);
         }
@@ -111,6 +132,6 @@ public class RiskEngine {
     }
 
     public boolean isKillSwitchActive() { return killSwitch.get(); }
-    public double getDailyPnl()          { return dailyPnl; }
+    public double  getDailyPnl()         { return dailyPnl; }
     public Map<String, Double> getPositions() { return positions; }
 }

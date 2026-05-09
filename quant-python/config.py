@@ -12,7 +12,7 @@ TOPIC_ORDERBOOK         = "quant.orderbook"
 
 # Claude AI
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL      = "claude-sonnet-4-20250514"
+CLAUDE_MODEL      = "claude-sonnet-4-6"  # fixed: was stale date-stamped ID
 
 # Redis
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -23,15 +23,22 @@ DB_URL = os.getenv("DATABASE_URL",
     "postgresql://quant:quant123@localhost:5432/quantdb")
 
 # Signal engine
-SIGNAL_LOOKBACK_BARS  = 200     # bars for indicator calculation
-MIN_CONFIDENCE        = 0.60    # minimum signal confidence to publish
-SIGNAL_COOLDOWN_SEC   = 30      # seconds between signals for same symbol
+SIGNAL_LOOKBACK_BARS = 200      # bars for indicator calculation
+MIN_CONFIDENCE       = 0.55     # minimum signal confidence to publish
+SIGNAL_COOLDOWN_SEC  = 20       # seconds between signals for same symbol
 
-# Risk (Python-side soft limits — hard limits in Java)
-MAX_POSITION_USD  = 50_000
-MAX_ORDER_USD     = 5_000
-MIN_SPREAD_BPS    = 0.1
-MAX_SPREAD_BPS    = 4.0
+# ML online learning
+LABEL_LOOKAHEAD_STEPS = 5       # evaluation cycles ahead used to compute forward return
+
+# Risk (Python-side soft limits — hard limits enforced in Java RiskEngine)
+MAX_POSITION_USD = 50_000
+MAX_ORDER_USD    = 5_000
+MIN_SPREAD_BPS   = 0.1
+MAX_SPREAD_BPS   = 4.0
+
+# Paper trading
+PAPER_TRADING             = True
+PAPER_INITIAL_CAPITAL_USD = 100_000
 
 # Dashboard
 DASHBOARD_HOST = "0.0.0.0"

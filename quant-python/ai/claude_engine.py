@@ -6,12 +6,8 @@ import config
 
 class ClaudeReasoningEngine:
     """
-    Uses Claude API to apply contextual reasoning on top of
-    quantitative signals before a trade decision is made.
-
-    Claude acts as a senior quant analyst — given the raw signals,
-    market context, and recent price action, it returns a structured
-    trade decision with reasoning.
+    Uses Claude API to apply contextual reasoning on top of quantitative signals.
+    Falls back to rule-based human-readable reasoning when API key is not set.
     """
 
     SYSTEM_PROMPT = """You are a senior quantitative analyst at a hedge fund.
@@ -35,7 +31,7 @@ Output format:
 
     def __init__(self):
         if not config.ANTHROPIC_API_KEY:
-            logger.warning("ANTHROPIC_API_KEY not set — Claude reasoning disabled.")
+            logger.warning("ANTHROPIC_API_KEY not set — using rule-based reasoning.")
             self._client = None
         else:
             self._client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -53,14 +49,10 @@ Output format:
         current_price: float,
         spread_bps: float,
     ) -> dict:
-        """
-        Ask Claude to reason about a potential trade.
-        Returns a decision dict.
-        """
         if self._client is None:
-            # Fallback: trust technical + ML signals directly
             return self._fallback_decision(
-                technical_direction, technical_confidence, ml_prediction, ml_confidence
+                symbol, technical_direction, technical_confidence,
+                ml_prediction, ml_confidence, technical_signals
             )
 
         prompt = self._build_prompt(
@@ -84,12 +76,14 @@ Output format:
         except json.JSONDecodeError as e:
             logger.error("Claude returned invalid JSON for {}: {}", symbol, e)
             return self._fallback_decision(
-                technical_direction, technical_confidence, ml_prediction, ml_confidence
+                symbol, technical_direction, technical_confidence,
+                ml_prediction, ml_confidence, technical_signals
             )
         except Exception as e:
             logger.error("Claude API error for {}: {}", symbol, e)
             return self._fallback_decision(
-                technical_direction, technical_confidence, ml_prediction, ml_confidence
+                symbol, technical_direction, technical_confidence,
+                ml_prediction, ml_confidence, technical_signals
             )
 
     def _build_prompt(
@@ -122,23 +116,113 @@ ML Ensemble:
 Should we trade this? Return JSON only."""
 
     def _fallback_decision(
-        self, direction: int, tech_conf: float,
-        ml_pred: float, ml_conf: float
+        self,
+        symbol: str,
+        direction: int,
+        tech_conf: float,
+        ml_pred: float,
+        ml_conf: float,
+        signals: dict,
     ) -> dict:
-        """Decision without Claude — blend technical and ML signals."""
+        """Rule-based decision with rich human-readable reasoning."""
         combined_conf = (tech_conf + ml_conf) / 2
         ml_dir = 1 if ml_pred > 0 else -1
 
-        # Both signals must agree
         if direction == ml_dir and combined_conf >= config.MIN_CONFIDENCE:
             decision = "BUY" if direction > 0 else "SELL"
         else:
             decision = "HOLD"
 
+        reasoning = self._build_reasoning(
+            symbol, direction, ml_pred, ml_conf, combined_conf, signals, decision
+        )
+
+        risk_flags = []
+        atr_pct = signals.get("atr_pct", 0)
+        if atr_pct and atr_pct > 2.0:
+            risk_flags.append(f"High volatility: ATR {atr_pct:.1f}%")
+        vol_ratio = signals.get("volume_ratio", 1.0)
+        if vol_ratio and vol_ratio < 0.5:
+            risk_flags.append("Low volume — thin market")
+        if direction != ml_dir:
+            risk_flags.append("Technical and ML signals disagree")
+
         return {
             "decision":           decision,
             "confidence":         round(combined_conf, 4),
-            "reasoning":          "Fallback: technical + ML agreement",
-            "risk_flags":         [],
-            "suggested_size_pct": round(combined_conf * 0.5, 2),
+            "reasoning":          reasoning,
+            "risk_flags":         risk_flags,
+            "suggested_size_pct": round(combined_conf * 0.6, 2),
         }
+
+    def _build_reasoning(
+        self,
+        symbol: str,
+        direction: int,
+        ml_pred: float,
+        ml_conf: float,
+        combined_conf: float,
+        signals: dict,
+        decision: str,
+    ) -> str:
+        parts = []
+
+        rsi = signals.get("rsi")
+        if rsi is not None:
+            if rsi < 25:
+                parts.append(f"RSI extremely oversold at {rsi:.1f} — strong reversal signal")
+            elif rsi < 35:
+                parts.append(f"RSI oversold at {rsi:.1f} — bullish pressure building")
+            elif rsi > 75:
+                parts.append(f"RSI extremely overbought at {rsi:.1f} — reversal likely")
+            elif rsi > 65:
+                parts.append(f"RSI overbought at {rsi:.1f} — bearish pressure building")
+            else:
+                parts.append(f"RSI neutral at {rsi:.1f}")
+
+        macd_hist = signals.get("macd_hist")
+        if macd_hist is not None:
+            if macd_hist > 0:
+                parts.append(f"MACD histogram positive ({macd_hist:+.5f}) — bullish momentum")
+            else:
+                parts.append(f"MACD histogram negative ({macd_hist:+.5f}) — bearish momentum")
+
+        bb = signals.get("bb_pct_b")
+        if bb is not None:
+            if bb < 0.05:
+                parts.append("price breached lower Bollinger Band — deep oversold, mean-reversion BUY zone")
+            elif bb > 0.95:
+                parts.append("price breached upper Bollinger Band — deep overbought, mean-reversion SELL zone")
+            elif bb < 0.2:
+                parts.append(f"price near lower Bollinger Band (BB%B={bb:.2f}) — oversold")
+            elif bb > 0.8:
+                parts.append(f"price near upper Bollinger Band (BB%B={bb:.2f}) — overbought")
+
+        ema = signals.get("ema_cross")
+        if ema is not None:
+            if ema > 0:
+                parts.append("EMA9 above EMA21 — short-term uptrend confirmed")
+            else:
+                parts.append("EMA9 below EMA21 — short-term downtrend confirmed")
+
+        vol_ratio = signals.get("volume_ratio")
+        if vol_ratio is not None:
+            if vol_ratio > 2.0:
+                parts.append(f"volume {vol_ratio:.1f}x average — strong momentum confirmation")
+            elif vol_ratio > 1.3:
+                parts.append(f"volume {vol_ratio:.1f}x average — above-average activity")
+
+        ml_dir_str = "UP" if ml_pred > 0 else "DOWN"
+        parts.append(
+            f"ML ensemble predicts {ml_dir_str} with {ml_conf:.0%} confidence"
+        )
+
+        if decision in ("BUY", "SELL"):
+            parts.append(
+                f"Technical and ML signals agree → {decision} "
+                f"(combined confidence {combined_conf:.0%})"
+            )
+        else:
+            parts.append("Technical and ML signals conflict or confidence too low → HOLD")
+
+        return ". ".join(parts) + "."
