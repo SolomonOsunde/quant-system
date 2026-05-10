@@ -24,7 +24,7 @@ DB_URL = os.getenv("DATABASE_URL",
 
 # Signal engine
 SIGNAL_LOOKBACK_BARS = 200      # bars for indicator calculation
-MIN_CONFIDENCE       = 0.55     # minimum signal confidence to publish
+MIN_CONFIDENCE       = 0.15     # minimum signal confidence to publish (paper mode)
 SIGNAL_COOLDOWN_SEC  = 20       # seconds between signals for same symbol
 
 # ML online learning
@@ -34,7 +34,7 @@ LABEL_LOOKAHEAD_STEPS = 5       # evaluation cycles ahead used to compute forwar
 MAX_POSITION_USD = 50_000
 MAX_ORDER_USD    = 5_000
 MIN_SPREAD_BPS   = 0.1
-MAX_SPREAD_BPS   = 4.0
+MAX_SPREAD_BPS   = 200.0   # high ceiling — commodity sim data has wide artificial spreads
 
 # Paper trading
 PAPER_TRADING             = True

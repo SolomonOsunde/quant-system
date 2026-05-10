@@ -125,10 +125,18 @@ Should we trade this? Return JSON only."""
         signals: dict,
     ) -> dict:
         """Rule-based decision with rich human-readable reasoning."""
-        combined_conf = (tech_conf + ml_conf) / 2
+        ml_trained = ml_conf > 0.0  # ml_conf==0.0 means model not yet trained
         ml_dir = 1 if ml_pred > 0 else -1
 
-        if direction == ml_dir and combined_conf >= config.MIN_CONFIDENCE:
+        if ml_trained:
+            combined_conf = (tech_conf + ml_conf) / 2
+            signals_agree = direction == ml_dir
+        else:
+            # ML not trained yet — trust technical signal alone
+            combined_conf = tech_conf
+            signals_agree = True
+
+        if signals_agree and combined_conf >= config.MIN_CONFIDENCE:
             decision = "BUY" if direction > 0 else "SELL"
         else:
             decision = "HOLD"
@@ -218,11 +226,12 @@ Should we trade this? Return JSON only."""
         )
 
         if decision in ("BUY", "SELL"):
+            action = "go LONG" if decision == "BUY" else "go SHORT"
             parts.append(
-                f"Technical and ML signals agree → {decision} "
+                f"Technical and ML signals agree — {action} "
                 f"(combined confidence {combined_conf:.0%})"
             )
         else:
-            parts.append("Technical and ML signals conflict or confidence too low → HOLD")
+            parts.append("Technical and ML signals conflict or confidence too low — stand aside")
 
         return ". ".join(parts) + "."

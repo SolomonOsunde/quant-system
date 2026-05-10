@@ -13,7 +13,7 @@ class TickConsumer:
     Maintains a rolling window of ticks per symbol for signal computation.
     """
 
-    WINDOW_SIZE = 500  # ticks per symbol kept in memory
+    WINDOW_SIZE = 15_000  # ~5 min of BTC at 50 ticks/sec; ~2 hrs commodity at 2/sec
 
     def __init__(self, on_tick: Callable[[dict], None] = None):
         self._consumer = Consumer({

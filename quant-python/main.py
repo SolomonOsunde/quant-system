@@ -176,16 +176,19 @@ class QuantPythonLayer:
         # Enforce per-symbol cooldown
         if now - self._last_eval_time[symbol] < config.SIGNAL_COOLDOWN_SEC:
             return
-        self._last_eval_time[symbol] = now   # always update so cooldown is respected
+        self._last_eval_time[symbol] = now
 
         ticks = self.tick_consumer.get_ticks(symbol)
+        logger.debug("{}: {} ticks in window", symbol, len(ticks))
         if len(ticks) < self.MIN_TICKS_REQUIRED:
+            logger.debug("{}: too few ticks ({}), skipping", symbol, len(ticks))
             return
 
         current_tick = ticks[-1]
         market = current_tick.get("market", "UNKNOWN")
         price  = current_tick.get("last") or current_tick.get("bid", 0)
         if price <= 0:
+            logger.debug("{}: invalid price {}", symbol, price)
             return
 
         bid = current_tick.get("bid", price)
@@ -193,22 +196,29 @@ class QuantPythonLayer:
         spread_bps = (ask - bid) / price * 10_000 if price > 0 else 0
 
         if spread_bps > config.MAX_SPREAD_BPS:
+            logger.debug("{}: spread too wide ({:.1f} bps)", symbol, spread_bps)
             return
 
         # 1. Technical signals
         tech_result = self.tech_engine.compute(symbol, ticks)
         if tech_result is None:
+            logger.debug("{}: tech engine returned None", symbol)
             return
 
-        # 2. ML online-learning: snapshot price, generate labels for past snapshots
+        logger.info("{}: tech dir={} conf={:.2f} score={}", symbol,
+                    tech_result.direction, tech_result.confidence,
+                    tech_result.signals.get("score", "?"))
+
+        # 2. ML online-learning
         self._tick_ml_labels(symbol, price)
 
         # 3. ML ensemble prediction
         prices_list = [t.get("last", t.get("bid", 0)) for t in ticks]
         ml_pred = self.ml_model.predict(tech_result.signals, prices_list)
 
-        # Pre-filter: skip when both sources are clearly neutral
-        if tech_result.direction == 0 and abs(ml_pred.direction) < 0.25:
+        # Skip neutral technical signals
+        if tech_result.direction == 0:
+            logger.debug("{}: tech direction neutral, skipping", symbol)
             return
 
         # 4. Claude AI final decision
@@ -253,21 +263,37 @@ class QuantPythonLayer:
         # Paper trading fill
         self.portfolio.fill(symbol, decision, quantity, price, market)
 
+        # Compute trade levels from ATR
+        atr_pct = tech_result.signals.get("atr_pct", 1.0)
+        levels  = self._compute_trade_levels(price, decision, atr_pct, market)
+
+        # Append level summary to reasoning
+        direction_word = "LONG" if decision == "BUY" else "SHORT"
+        level_summary = (
+            f"Trade setup → {direction_word} {symbol} | "
+            f"Entry: {levels['entry']} | "
+            f"Stop Loss: {levels['stop_loss']} (-{levels['sl_pct']}%) | "
+            f"Take Profit: {levels['take_profit']} (+{levels['tp_pct']}%) | "
+            f"Leverage: {levels['leverage']}x"
+        )
+        full_reasoning = f"{reasoning} {level_summary}"
+
         # Record signal for dashboard
         record = {
-            "timestamp":  time.strftime("%H:%M:%S"),
-            "symbol":     symbol,
-            "market":     market,
-            "side":       decision,
-            "quantity":   round(quantity, 6),
-            "price":      round(price, 6),
-            "confidence": round(confidence, 3),
-            "strategy":   "POLYGLOT_QUANT_V1",
-            "reasoning":  reasoning,
-            "risk_flags": ", ".join(risk_flags) if risk_flags else "",
-            "rsi":        round(tech_result.signals.get("rsi", 0), 1),
-            "macd_hist":  round(tech_result.signals.get("macd_hist", 0), 5),
-            "ml_dir":     round(ml_pred.direction, 3),
+            "timestamp":   time.strftime("%H:%M:%S"),
+            "symbol":      symbol,
+            "market":      market,
+            "side":        decision,
+            "quantity":    round(quantity, 6),
+            "price":       round(price, 6),
+            "confidence":  round(confidence, 3),
+            "strategy":    "POLYGLOT_QUANT_V1",
+            "reasoning":   full_reasoning,
+            "risk_flags":  ", ".join(risk_flags) if risk_flags else "",
+            "rsi":         round(tech_result.signals.get("rsi", 0), 1),
+            "macd_hist":   round(tech_result.signals.get("macd_hist", 0), 5),
+            "ml_dir":      round(ml_pred.direction, 3),
+            **levels,
         }
         with self._lock:
             self._recent_signals.append(record)
@@ -292,6 +318,47 @@ class QuantPythonLayer:
             if past_price > 0:
                 forward_return = (current_price - past_price) / past_price
                 self.ml_model.update_labels([forward_return])
+
+    # ── Trade level computation ───────────────────────────────────────────────
+
+    def _compute_trade_levels(
+        self, price: float, side: str, atr_pct: float, market: str
+    ) -> dict:
+        """Compute entry, stop loss, take profit, and leverage from ATR."""
+        atr_abs = price * (atr_pct / 100) if atr_pct else price * 0.01
+
+        if side == "BUY":
+            stop_loss   = price - 1.5 * atr_abs
+            take_profit = price + 3.0 * atr_abs
+        else:  # SELL / short
+            stop_loss   = price + 1.5 * atr_abs
+            take_profit = price - 3.0 * atr_abs
+
+        sl_pct = abs(price - stop_loss) / price * 100
+        tp_pct = abs(take_profit - price) / price * 100
+
+        if atr_pct > 3.0:
+            leverage = 2
+        elif atr_pct > 1.5:
+            leverage = 3
+        elif atr_pct > 0.8:
+            leverage = 5
+        elif atr_pct > 0.3:
+            leverage = 7
+        else:
+            leverage = 10
+
+        if market != "CRYPTO":
+            leverage = min(leverage, 5)
+
+        return {
+            "entry":       round(price, 6),
+            "stop_loss":   round(stop_loss, 6),
+            "take_profit": round(take_profit, 6),
+            "sl_pct":      round(sl_pct, 2),
+            "tp_pct":      round(tp_pct, 2),
+            "leverage":    leverage,
+        }
 
     # ── Position sizing ───────────────────────────────────────────────────────
 

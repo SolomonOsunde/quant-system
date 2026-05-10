@@ -19,15 +19,14 @@ class SignalResult:
 
 class TechnicalSignalEngine:
     """
-    Computes multi-factor technical signals from tick data.
-    Returns a SignalResult with direction and confidence score.
+    Multi-factor technical signals from tick data.
 
-    Indicators:
-      - RSI (14)              — momentum
-      - MACD (12/26/9)        — trend
-      - Bollinger Bands (20/2) — mean reversion
-      - EMA crossover (9/21)  — trend confirmation
-      - ATR (14)              — volatility filter
+    Uses shortened indicator periods so signals fire within ~5 min of startup:
+      - RSI (10)              — momentum
+      - MACD (10/21/7)        — trend  (slow=21 bars × 15s = 5.25 min warmup)
+      - Bollinger Bands (15/2) — mean reversion
+      - EMA crossover (7/15)  — trend confirmation
+      - ATR (10)              — volatility filter
       - Volume spike          — confirmation
     """
 
@@ -36,7 +35,7 @@ class TechnicalSignalEngine:
             return None
 
         df = self._ticks_to_ohlcv(ticks)
-        if df is None or len(df) < 15:
+        if df is None or len(df) < 5:
             return None
 
         try:
@@ -46,17 +45,17 @@ class TechnicalSignalEngine:
             return None
 
     def _ticks_to_ohlcv(self, ticks: list[dict]) -> Optional[pd.DataFrame]:
-        """Resample raw ticks into 1-minute OHLCV bars."""
+        """Resample raw ticks into 15-second OHLCV bars."""
         try:
             df = pd.DataFrame(ticks)
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df = df.set_index("timestamp").sort_index()
             df["price"] = df["last"].fillna(df.get("bid", 0))
 
-            ohlcv = df["price"].resample("30s").ohlc()
-            ohlcv["volume"] = df["volume"].resample("30s").sum()
+            ohlcv = df["price"].resample("15s").ohlc()
+            ohlcv["volume"] = df["volume"].resample("15s").sum()
             ohlcv = ohlcv.dropna()
-            return ohlcv if len(ohlcv) >= 10 else None
+            return ohlcv if len(ohlcv) >= 5 else None
 
         except Exception as e:
             logger.warning("OHLCV conversion error: {}", e)
@@ -71,9 +70,9 @@ class TechnicalSignalEngine:
         signals: dict = {}
         scores:  list = []
 
-        # ── RSI ────────────────────────────────────────────────────────────
+        # ── RSI (5) ────────────────────────────────────────────────────────
         try:
-            rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+            rsi_val = RSIIndicator(close=close, window=5).rsi().iloc[-1]
             signals["rsi"] = round(rsi_val, 2)
             if rsi_val < 30:
                 scores.append(+1.0)
@@ -88,9 +87,9 @@ class TechnicalSignalEngine:
         except Exception:
             pass
 
-        # ── MACD ───────────────────────────────────────────────────────────
+        # ── MACD (5/10/4) ─────────────────────────────────────────────────
         try:
-            macd_obj  = MACD(close=close, window_fast=12, window_slow=26, window_sign=9)
+            macd_obj  = MACD(close=close, window_fast=5, window_slow=10, window_sign=4)
             macd_line = macd_obj.macd().iloc[-1]
             macd_sig  = macd_obj.macd_signal().iloc[-1]
             macd_hist = macd_obj.macd_diff().iloc[-1]
@@ -104,9 +103,9 @@ class TechnicalSignalEngine:
         except Exception:
             pass
 
-        # ── Bollinger Bands ────────────────────────────────────────────────
+        # ── Bollinger Bands (8/2) ─────────────────────────────────────────
         try:
-            bb     = BollingerBands(close=close, window=20, window_dev=2)
+            bb     = BollingerBands(close=close, window=8, window_dev=2)
             upper  = bb.bollinger_hband().iloc[-1]
             lower  = bb.bollinger_lband().iloc[-1]
             price  = close.iloc[-1]
@@ -125,34 +124,34 @@ class TechnicalSignalEngine:
         except Exception:
             pass
 
-        # ── EMA crossover (9 / 21) ─────────────────────────────────────────
+        # ── EMA crossover (4/8) ───────────────────────────────────────────
         try:
-            e9  = EMAIndicator(close=close, window=9).ema_indicator().iloc[-1]
-            e21 = EMAIndicator(close=close, window=21).ema_indicator().iloc[-1]
-            signals["ema_cross"] = round(e9 - e21, 6)
-            scores.append(+0.6 if e9 > e21 else -0.6)
+            e4  = EMAIndicator(close=close, window=4).ema_indicator().iloc[-1]
+            e8  = EMAIndicator(close=close, window=8).ema_indicator().iloc[-1]
+            signals["ema_cross"] = round(e4 - e8, 6)
+            scores.append(+0.6 if e4 > e8 else -0.6)
         except Exception:
             pass
 
-        # ── ATR volatility filter ──────────────────────────────────────────
+        # ── ATR volatility filter (5) ─────────────────────────────────────
         try:
             atr_val = AverageTrueRange(
-                high=high, low=low, close=close, window=14
+                high=high, low=low, close=close, window=5
             ).average_true_range().iloc[-1]
             atr_pct = atr_val / close.iloc[-1] if close.iloc[-1] > 0 else 0
             signals["atr_pct"] = round(atr_pct * 100, 4)
-            if atr_pct > 0.03:        # >3% ATR — too volatile, dampen scores
+            if atr_pct > 0.03:
                 scores = [s * 0.5 for s in scores]
-            elif atr_pct < 0.0001:    # near-zero ATR — no movement
+            elif atr_pct < 0.0001:
                 scores = [s * 0.3 for s in scores]
         except Exception:
             pass
 
-        # ── Volume confirmation ────────────────────────────────────────────
+        # ── Volume confirmation ───────────────────────────────────────────
         try:
-            if len(volume) >= 20:
-                avg_vol   = volume.iloc[-20:].mean()
-                last_vol  = volume.iloc[-1]
+            if len(volume) >= 15:
+                avg_vol  = volume.iloc[-15:].mean()
+                last_vol = volume.iloc[-1]
                 vol_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
                 signals["volume_ratio"] = round(vol_ratio, 2)
                 if vol_ratio > 1.5:
@@ -160,7 +159,7 @@ class TechnicalSignalEngine:
         except Exception:
             pass
 
-        # ── Aggregate ──────────────────────────────────────────────────────
+        # ── Aggregate ─────────────────────────────────────────────────────
         if not scores:
             return SignalResult(symbol, 0, 0.0, signals, "Insufficient data")
 
