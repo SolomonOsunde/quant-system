@@ -10,6 +10,7 @@ import org.java_websocket.handshake.ServerHandshake;
 import java.net.URI;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Alpaca WebSocket feed for US equity tick data.
@@ -87,11 +88,18 @@ public class EquityFeed extends BaseMarketFeed {
         };
 
         wsClient.connectBlocking();
-        authLatch.await();
+        boolean authed = authLatch.await(30, TimeUnit.SECONDS);
+        if (!authed || !wsClient.isOpen()) {
+            log.warn("[EquityFeed] Alpaca auth timed out or connection closed (market may be closed). Falling back to simulation.");
+            simulateFeed();
+            return;
+        }
 
         while (running.get() && wsClient.isOpen()) {
             Thread.sleep(1000);
         }
+        log.warn("[EquityFeed] Alpaca WebSocket disconnected. Falling back to simulation.");
+        simulateFeed();
     }
 
     private void subscribeToQuotes() {

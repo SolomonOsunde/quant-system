@@ -40,7 +40,7 @@ public class ForexFeed extends BaseMarketFeed {
         String apiKey    = System.getenv("OANDA_API_KEY");
         String accountId = System.getenv("OANDA_ACCOUNT_ID");
 
-        if (apiKey == null || accountId == null) {
+        if (apiKey == null || apiKey.isEmpty() || accountId == null || accountId.isEmpty()) {
             log.warn("[ForexFeed] OANDA_API_KEY or OANDA_ACCOUNT_ID not set. " +
                      "Running in simulation mode.");
             simulateFeed();

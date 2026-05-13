@@ -107,6 +107,9 @@ services:
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
       OANDA_API_KEY: ${OANDA_API_KEY:-}
       OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
 
   quant-python:
