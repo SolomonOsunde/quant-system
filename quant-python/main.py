@@ -187,6 +187,9 @@ class QuantPythonLayer:
         current_tick = ticks[-1]
         market = current_tick.get("market", "UNKNOWN")
         price  = current_tick.get("last") or current_tick.get("bid", 0)
+        # Treat as simulation if all recent ticks are from a simulated source
+        recent_sources = {t.get("source", "SIMULATION") for t in ticks[-10:]}
+        is_simulation  = recent_sources <= {"SIMULATION"}
         if price <= 0:
             logger.debug("{}: invalid price {}", symbol, price)
             return
@@ -255,6 +258,7 @@ class QuantPythonLayer:
             confidence = confidence,
             spread_bps = spread_bps,
             reasoning  = reasoning,
+            simulation = is_simulation,
         )
 
         if not published:

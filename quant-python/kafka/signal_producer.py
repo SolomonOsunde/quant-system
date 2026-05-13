@@ -31,6 +31,7 @@ class SignalProducer:
         confidence: float = 0.0,
         spread_bps: float = 0.0,
         reasoning: str = "",
+        simulation: bool = False,
     ) -> bool:
         """
         Publish a trade signal to the Java execution engine.
@@ -47,6 +48,7 @@ class SignalProducer:
             "spreadBps":  round(spread_bps, 2),
             "reasoning":  reasoning[:500],  # cap length
             "timestamp":  int(time.time() * 1000),
+            "simulation": simulation,
         }
 
         try:

@@ -126,9 +126,15 @@ public class ExecutionEngine {
             String strategy   = signal.path("strategy").asText("UNKNOWN");
             double confidence = signal.path("confidence").asDouble(0.5);
             double spreadBps  = signal.path("spreadBps").asDouble(0);
+            boolean simulation = signal.path("simulation").asBoolean(true);
 
-            log.info("Signal received: {} {} {} @ {} | strategy={} confidence={}",
-                side, quantity, symbol, price, strategy, confidence);
+            log.info("Signal received: {} {} {} @ {} | strategy={} confidence={} simulation={}",
+                side, quantity, symbol, price, strategy, confidence, simulation);
+
+            if (simulation) {
+                log.info("[EXECUTION] Simulation signal — skipping live order for {}", symbol);
+                return;
+            }
 
             // Pre-trade risk check
             RiskEngine.CheckResult result =
