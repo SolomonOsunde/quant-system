@@ -136,6 +136,15 @@ public class ExecutionEngine {
                 return;
             }
 
+            // Crypto: no short-selling — skip SELL when we have no position
+            if ("SELL".equals(side) && symbol.contains("/")) {
+                double pos = riskEngine.getPositions().getOrDefault(symbol, 0.0);
+                if (pos <= 0) {
+                    log.info("[EXECUTION] Skipping crypto SELL for {} — no position held", symbol);
+                    return;
+                }
+            }
+
             // Pre-trade risk check
             RiskEngine.CheckResult result =
                 riskEngine.check(symbol, side, quantity, price, spreadBps);
@@ -181,14 +190,16 @@ public class ExecutionEngine {
      */
     private String executeOrderAlpaca(String symbol, String side, double qty,
                                       double price, String orderType) {
-        String alpacaSymbol = SYMBOL_MAP.getOrDefault(symbol, symbol);
+        // Normalize: map futures→ETF, then strip "/" for Alpaca crypto (BTC/USD → BTCUSD)
+        String alpacaSymbol = SYMBOL_MAP.getOrDefault(symbol, symbol).replace("/", "");
         String alpacaSide   = side.equalsIgnoreCase("BUY") ? "buy" : "sell";
         long   wholeQty     = Math.max(1L, Math.round(qty));
 
-        // Build request body
+        // Crypto requires "gtc"; equities use "day"
+        String tif  = symbol.contains("/") ? "gtc" : "day";
         String body = String.format(
-            "{\"symbol\":\"%s\",\"qty\":\"%d\",\"side\":\"%s\",\"type\":\"market\",\"time_in_force\":\"day\"}",
-            alpacaSymbol, wholeQty, alpacaSide
+            "{\"symbol\":\"%s\",\"qty\":\"%d\",\"side\":\"%s\",\"type\":\"market\",\"time_in_force\":\"%s\"}",
+            alpacaSymbol, wholeQty, alpacaSide, tif
         );
 
         log.info("[ALPACA] Submitting order: symbol={} (raw={}) side={} qty={} (raw={:.4f})",

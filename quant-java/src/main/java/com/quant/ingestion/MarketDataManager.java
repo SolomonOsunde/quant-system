@@ -37,27 +37,12 @@ public class MarketDataManager {
     public void startAll() {
         log.info("Starting market data feeds...");
 
-        // Forex feed (OANDA / FXCM WebSocket)
-        ForexFeed forexFeed = new ForexFeed(kafkaProducer, orderBookManager);
-        feeds.add(forexFeed);
-        executor.submit(forexFeed);
-
-        // Crypto feed (Binance WebSocket)
+        // Crypto-only mode — Alpaca crypto WebSocket (24/7, no market hours restriction)
         CryptoFeed cryptoFeed = new CryptoFeed(kafkaProducer, orderBookManager);
         feeds.add(cryptoFeed);
         executor.submit(cryptoFeed);
 
-        // Equity feed (Alpaca WebSocket)
-        EquityFeed equityFeed = new EquityFeed(kafkaProducer, orderBookManager);
-        feeds.add(equityFeed);
-        executor.submit(equityFeed);
-
-        // Commodity/Futures feed (Interactive Brokers TWS)
-        CommodityFeed commodityFeed = new CommodityFeed(kafkaProducer, orderBookManager);
-        feeds.add(commodityFeed);
-        executor.submit(commodityFeed);
-
-        log.info("Started {} market data feeds.", feeds.size());
+        log.info("Started {} market data feed(s).", feeds.size());
     }
 
     public void shutdown() {

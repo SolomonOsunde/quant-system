@@ -64,7 +64,7 @@ public class EquityFeed extends BaseMarketFeed {
                     JsonNode arr = mapper.readTree(message);
                     for (JsonNode node : arr) {
                         String msgType = node.path("T").asText();
-                        if ("authenticated".equals(msgType)) {
+                        if ("success".equals(msgType) && "authenticated".equals(node.path("msg").asText())) {
                             subscribeToQuotes();
                             authLatch.countDown();
                         } else if ("q".equals(msgType)) {

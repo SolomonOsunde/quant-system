@@ -187,9 +187,8 @@ class QuantPythonLayer:
         current_tick = ticks[-1]
         market = current_tick.get("market", "UNKNOWN")
         price  = current_tick.get("last") or current_tick.get("bid", 0)
-        # Treat as simulation if all recent ticks are from a simulated source
-        recent_sources = {t.get("source", "SIMULATION") for t in ticks[-10:]}
-        is_simulation  = recent_sources <= {"SIMULATION"}
+        # Live if the most recent tick came from a real feed (not simulation)
+        is_simulation = current_tick.get("source", "SIMULATION") == "SIMULATION"
         if price <= 0:
             logger.debug("{}: invalid price {}", symbol, price)
             return

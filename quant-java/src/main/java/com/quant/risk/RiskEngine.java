@@ -48,7 +48,7 @@ public class RiskEngine {
         this.maxOrderUsd     = QuantConfig.getDouble("risk.max.order.usd",        10_000);
         this.maxDailyLossUsd = QuantConfig.getDouble("risk.max.daily.loss.usd",    5_000);
         this.maxOrdersPerMin = QuantConfig.getInt("risk.max.orders.per.minute",       60);
-        this.maxSpreadBps    = QuantConfig.getDouble("risk.max.spread.bps",          5.0);
+        this.maxSpreadBps    = QuantConfig.getDouble("risk.max.spread.bps",         50.0);  // crypto spreads ~10bps
 
         log.info("RiskEngine limits — position=${} order=${} dailyLoss=${} rate={}/min spread={}bps",
             maxPositionUsd, maxOrderUsd, maxDailyLossUsd, maxOrdersPerMin, maxSpreadBps);
@@ -93,7 +93,7 @@ public class RiskEngine {
         }
 
         if (spreadBps > maxSpreadBps) {
-            log.warn("Spread too wide for {}: {:.1f} bps > {:.1f}", symbol, spreadBps, maxSpreadBps);
+            log.warn("Spread too wide for {}: {} bps > {} bps", symbol, String.format("%.1f", spreadBps), maxSpreadBps);
             return CheckResult.REJECTED_SPREAD;
         }
 
