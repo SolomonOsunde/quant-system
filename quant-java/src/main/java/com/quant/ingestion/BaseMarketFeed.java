@@ -19,9 +19,9 @@ public abstract class BaseMarketFeed implements Runnable {
     protected final OrderBookManager orderBookManager;
     protected final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Reconnect config
-    protected static final int MAX_RECONNECT_ATTEMPTS = 10;
-    protected static final long RECONNECT_DELAY_MS    = 3_000;
+    /** Max delay between reconnect attempts (caps exponential backoff at 2 min). */
+    protected static final long RECONNECT_DELAY_MS = 3_000;
+    protected static final long MAX_DELAY_MS       = 120_000;
 
     protected BaseMarketFeed(QuantKafkaProducer kafkaProducer,
                               OrderBookManager orderBookManager) {
@@ -33,17 +33,19 @@ public abstract class BaseMarketFeed implements Runnable {
     public void run() {
         running.set(true);
         int attempts = 0;
-        while (running.get() && attempts < MAX_RECONNECT_ATTEMPTS) {
+        while (running.get()) {
             try {
                 log.info("[{}] Connecting... (attempt {})", feedName(), attempts + 1);
                 connect();
-                attempts = 0; // reset on successful connection
+                attempts = 0; // reset counter after a successful session
             } catch (Exception e) {
                 attempts++;
-                log.warn("[{}] Connection error (attempt {}): {}", feedName(), attempts, e.getMessage());
-                if (running.get() && attempts < MAX_RECONNECT_ATTEMPTS) {
+                long delay = Math.min(RECONNECT_DELAY_MS * attempts, MAX_DELAY_MS);
+                log.warn("[{}] Connection error (attempt {}): {} — retrying in {}s",
+                         feedName(), attempts, e.getMessage(), delay / 1000);
+                if (running.get()) {
                     try {
-                        Thread.sleep(RECONNECT_DELAY_MS * attempts);
+                        Thread.sleep(delay);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         break;
@@ -51,9 +53,7 @@ public abstract class BaseMarketFeed implements Runnable {
                 }
             }
         }
-        if (attempts >= MAX_RECONNECT_ATTEMPTS) {
-            log.error("[{}] Max reconnect attempts reached. Feed stopped.", feedName());
-        }
+        log.info("[{}] Feed loop exited.", feedName());
     }
 
     /**

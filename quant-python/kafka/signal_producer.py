@@ -31,6 +31,10 @@ class SignalProducer:
         confidence: float = 0.0,
         spread_bps: float = 0.0,
         reasoning: str = "",
+        simulation: bool = False,
+        is_exit: bool = False,
+        entry_price: float = 0.0,
+        pnl: float = None,
     ) -> bool:
         """
         Publish a trade signal to the Java execution engine.
@@ -45,9 +49,15 @@ class SignalProducer:
             "strategy":   strategy,
             "confidence": round(confidence, 4),
             "spreadBps":  round(spread_bps, 2),
-            "reasoning":  reasoning[:500],  # cap length
+            "reasoning":  reasoning[:500],
             "timestamp":  int(time.time() * 1000),
+            "simulation": simulation,
+            "isExit":     is_exit,
         }
+        if entry_price > 0:
+            signal["entryPrice"] = round(entry_price, 8)
+        if pnl is not None:
+            signal["pnl"] = round(pnl, 4)
 
         try:
             self._producer.produce(
@@ -58,8 +68,8 @@ class SignalProducer:
             )
             self._producer.poll(0)
             self._signal_count += 1
-            logger.info("Signal: {} {} {} @ {:.5f} | conf={:.2f} strategy={}",
-                        side, quantity, symbol, price, confidence, strategy)
+            logger.info("Signal: {} {} {} @ {:.5f} | conf={:.2f} strategy={} exit={}",
+                        side, quantity, symbol, price, confidence, strategy, is_exit)
             return True
 
         except Exception as e:

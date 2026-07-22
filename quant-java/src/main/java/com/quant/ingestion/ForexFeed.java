@@ -2,6 +2,8 @@ package com.quant.ingestion;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quant.SymbolMapper;
+import com.quant.config.InstrumentRepository;
 import com.quant.kafka.QuantKafkaProducer;
 import com.quant.orderbook.OrderBookManager;
 
@@ -10,23 +12,14 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * OANDA v20 streaming API feed for Forex tick data.
- * Uses HTTP chunked streaming (not WebSocket).
- * Docs: https://developer.oanda.com/rest-live-v20/pricing-ep/
- *
- * Set OANDA_API_KEY and OANDA_ACCOUNT_ID in application.properties.
+ * Pair list comes from Postgres {@code instruments} (market=FOREX).
+ * Live-only — no simulation fallback.
  */
 public class ForexFeed extends BaseMarketFeed {
-
-    private static final String BASE_URL =
-        "https://stream-fxtrade.oanda.com/v3/accounts/%s/pricing/stream?instruments=%s";
-
-    private static final List<String> PAIRS = List.of(
-        "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
-        "USD_CHF", "EUR_GBP", "EUR_JPY"
-    );
 
     private final ObjectMapper mapper = new ObjectMapper();
     private volatile HttpURLConnection conn;
@@ -39,23 +32,43 @@ public class ForexFeed extends BaseMarketFeed {
     protected void connect() throws Exception {
         String apiKey    = System.getenv("OANDA_API_KEY");
         String accountId = System.getenv("OANDA_ACCOUNT_ID");
+        boolean practice = !"false".equalsIgnoreCase(
+                System.getenv().getOrDefault("OANDA_PRACTICE", "true"));
 
-        if (apiKey == null || accountId == null) {
-            log.warn("[ForexFeed] OANDA_API_KEY or OANDA_ACCOUNT_ID not set. " +
-                     "Running in simulation mode.");
-            simulateFeed();
-            return;
+        if (apiKey == null || apiKey.isEmpty() || accountId == null || accountId.isEmpty()) {
+            throw new IllegalStateException(
+                    "[ForexFeed] OANDA_API_KEY / OANDA_ACCOUNT_ID required for live testing — simulation removed");
         }
 
-        String instruments = String.join("%2C", PAIRS);
-        String urlStr = String.format(BASE_URL, accountId, instruments);
+        List<InstrumentRepository.Instrument> instruments =
+                InstrumentRepository.loadEnabled("FOREX");
+        if (instruments.isEmpty()) {
+            throw new IllegalStateException(
+                    "[ForexFeed] No enabled FOREX rows in instruments table — seed DB first");
+        }
+
+        List<String> brokerPairs = instruments.stream()
+                .map(InstrumentRepository.Instrument::brokerSymbol)
+                .collect(Collectors.toList());
+        for (InstrumentRepository.Instrument inst : instruments) {
+            SymbolMapper.register(inst.symbol(), inst.brokerSymbol().replace("_", ""));
+        }
+
+        String host = practice
+                ? "https://stream-fxpractice.oanda.com"
+                : "https://stream-fxtrade.oanda.com";
+        String joined = String.join("%2C", brokerPairs);
+        String urlStr = String.format(
+                "%s/v3/accounts/%s/pricing/stream?instruments=%s",
+                host, accountId, joined);
 
         conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestProperty("Authorization", "Bearer " + apiKey);
         conn.setRequestProperty("Accept-Encoding", "identity");
         conn.connect();
 
-        log.info("[ForexFeed] Connected to OANDA streaming.");
+        log.info("[ForexFeed] Connected to OANDA {} — {} pairs from DB: {}",
+                practice ? "practice" : "live", brokerPairs.size(), brokerPairs);
 
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(conn.getInputStream()))) {
@@ -64,6 +77,7 @@ public class ForexFeed extends BaseMarketFeed {
                 if (!line.isBlank()) handleMessage(line);
             }
         }
+        throw new Exception("OANDA stream ended — will retry");
     }
 
     private void handleMessage(String raw) {
@@ -71,39 +85,19 @@ public class ForexFeed extends BaseMarketFeed {
             JsonNode node = mapper.readTree(raw);
             if (!"PRICE".equals(node.path("type").asText())) return;
 
-            String symbol = node.path("instrument").asText();
-            double bid    = node.path("bids").get(0).path("price").asDouble();
-            double ask    = node.path("asks").get(0).path("price").asDouble();
+            String oandaSym = node.path("instrument").asText();
+            String symbol = oandaSym.replace('_', '/');
+            SymbolMapper.register(symbol, oandaSym.replace("_", ""));
+            double bid = node.path("bids").get(0).path("price").asDouble();
+            double ask = node.path("asks").get(0).path("price").asDouble();
 
             TickData tick = new TickData(
                 symbol, TickData.Market.FOREX,
                 bid, ask, (bid + ask) / 2.0, 0, "OANDA"
             );
             onTick(tick);
-
         } catch (Exception e) {
             log.error("[ForexFeed] Parse error: {}", e.getMessage());
-        }
-    }
-
-    /** Simulates tick data when no API key is set — useful for development. */
-    private void simulateFeed() throws InterruptedException {
-        log.info("[ForexFeed] Simulation mode active.");
-        double[] prices = {1.08500, 1.27200, 149.500, 0.64800,
-                           1.36200, 0.89500, 0.84700, 161.200};
-        int i = 0;
-        while (running.get()) {
-            for (String pair : PAIRS) {
-                double mid    = prices[i % prices.length] * (1 + (Math.random() - 0.5) * 0.0002);
-                double spread = 0.00010 + Math.random() * 0.00005;
-                TickData tick = new TickData(
-                    pair, TickData.Market.FOREX,
-                    mid - spread / 2, mid + spread / 2, mid, 0, "SIMULATION"
-                );
-                onTick(tick);
-                i++;
-            }
-            Thread.sleep(500);
         }
     }
 
