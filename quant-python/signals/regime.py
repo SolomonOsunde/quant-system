@@ -14,6 +14,7 @@ The same momentum strategy that earns +40% annualized in trending regimes
 loses -20% in mean-reverting regimes. Gate it properly.
 """
 
+import math
 import numpy as np
 from dataclasses import dataclass
 from enum import IntEnum
@@ -55,35 +56,44 @@ class RegimeResult:
 class RegimeDetector:
     """
     Per-symbol regime detector with HMM that trains online.
-    create one instance per symbol and call compute() on every eval cycle.
+    Create one instance per symbol and call compute() on every eval cycle.
+
+    sample_period_seconds: spacing between price samples.
+      0.5 → live ticks (~2/s); 60 → 1-minute bars (backtest).
     """
 
-    VOL_WINDOW      = 3600    # ticks for realized vol (~30 min at 2t/s)
-    HURST_SCALES    = 8       # number of R/S scales
-    HMM_MIN_TRAIN   = 2_000   # observations before first HMM fit
-    HMM_RETRAIN_N   = 5_000   # retrain interval (ticks)
+    HURST_SCALES    = 8
+    HMM_MIN_TRAIN   = 2_000
+    HMM_RETRAIN_N   = 5_000
 
-    def __init__(self):
+    def __init__(self, sample_period_seconds: float = 0.5):
+        self.sample_period_seconds = sample_period_seconds
+        # ~30 minutes of samples for realized vol
+        self.VOL_WINDOW = max(30, int(1800 / sample_period_seconds))
+        self._ann_factor = math.sqrt(365 * 24 * 3600 / sample_period_seconds)
+
         self._hmm: Optional[GaussianHMM] = None
         self._hmm_trained    = False
         self._hmm_features:  list        = []
+        self._last_price: Optional[float] = None  # for incremental return appends
         self._ticks_since_retrain = 0
 
-        # Map raw HMM state → semantic label (assigned after fitting)
-        self._state_vol: dict[int, float] = {}   # mean vol per state
+        self._state_vol: dict[int, float] = {}
+        self._min_prices = 50 if sample_period_seconds >= 60 else 200
+        self._min_rets   = 20 if sample_period_seconds >= 60 else 50
 
     def compute(self, prices: list[float]) -> Optional[RegimeResult]:
-        if len(prices) < 200:
+        if len(prices) < self._min_prices:
             return None
 
         arr  = np.array([p for p in prices if p > 0], dtype=float)
         rets = np.diff(arr) / arr[:-1]
-        if len(rets) < 50:
+        if len(rets) < self._min_rets:
             return None
 
         # ── 1. Realized volatility regime ────────────────────────────────
-        window   = min(self.VOL_WINDOW, len(rets))
-        rv       = float(np.std(rets[-window:])) * np.sqrt(365 * 24 * 3600 / 0.5)
+        window = min(self.VOL_WINDOW, len(rets))
+        rv     = float(np.std(rets[-window:])) * self._ann_factor
 
         if rv > 6.0:
             vol_regime = "crisis"
@@ -95,15 +105,21 @@ class RegimeDetector:
             vol_regime = "low"
 
         # ── 2. Hurst exponent (R/S analysis) ─────────────────────────────
-        hurst = _compute_hurst(arr[-min(8000, len(arr)):], self.HURST_SCALES)
+        hurst_cap = 500 if self.sample_period_seconds >= 60 else 8000
+        hurst = _compute_hurst(arr[-min(hurst_cap, len(arr)):], self.HURST_SCALES)
 
-        # ── 3. HMM state ──────────────────────────────────────────────────
-        hmm_state, hmm_conf = self._update_hmm(rets)
+        # ── 3. HMM state — append only newest return by last price ────────
+        hmm_state, hmm_conf = self._update_hmm_price(arr)
 
-        # ── 4. Synthesize regime state ────────────────────────────────────
-        state = _classify_state(vol_regime, hurst, hmm_state, hmm_conf)
+        # ── 4. Trend direction (price now vs 25% of window ago) ───────────
+        trend_len = max(20, len(arr) // 4)
+        ref_price = arr[-trend_len]
+        trend_pct = (arr[-1] - ref_price) / ref_price if ref_price > 0 else 0.0
 
-        # ── 5. Strategy weights ───────────────────────────────────────────
+        # ── 5. Synthesize regime state ────────────────────────────────────
+        state = _classify_state(vol_regime, hurst, hmm_state, hmm_conf, trend_pct)
+
+        # ── 6. Strategy weights ───────────────────────────────────────────
         mom_w, mr_w, sa_w, ofi_w, pos_scale = _strategy_weights(state, hurst, rv)
 
         return RegimeResult(
@@ -120,17 +136,34 @@ class RegimeDetector:
             position_scale  = round(pos_scale, 3),
         )
 
-    def _update_hmm(self, returns: np.ndarray) -> tuple[int, float]:
-        if not _HMM_AVAILABLE or len(returns) < 20:
+    def _update_hmm_price(self, prices: np.ndarray) -> tuple[int, float]:
+        """
+        Append HMM features from the newest price only.
+
+        Using len(returns) > _hmm_n_seen freezes once a fixed-length rolling
+        window fills. Tracking last price appends one return per new tick/bar.
+        """
+        if not _HMM_AVAILABLE or len(prices) < 2:
             return 0, 0.5
 
-        # Feature: [return, |return|] — captures direction and magnitude
-        feat = np.column_stack([returns, np.abs(returns)]).tolist()
-        self._hmm_features.extend(feat)
+        last = float(prices[-1])
+        if self._last_price is None:
+            # Bootstrap with recent returns (once) without re-ingesting forever
+            rets = np.diff(prices) / prices[:-1]
+            seed = rets[-min(500, len(rets)):]
+            feat = np.column_stack([seed, np.abs(seed)]).tolist()
+            self._hmm_features.extend(feat)
+            self._ticks_since_retrain += len(seed)
+            self._last_price = last
+        elif abs(last - self._last_price) > 1e-15:
+            new_ret = (last - self._last_price) / self._last_price
+            self._hmm_features.append([new_ret, abs(new_ret)])
+            self._ticks_since_retrain += 1
+            self._last_price = last
+        # else: duplicate price — no new observation
+
         if len(self._hmm_features) > 30_000:
             self._hmm_features = self._hmm_features[-15_000:]
-
-        self._ticks_since_retrain += len(returns)
 
         if len(self._hmm_features) < self.HMM_MIN_TRAIN:
             return 0, 0.5
@@ -148,7 +181,7 @@ class RegimeDetector:
             return 0, 0.5
 
         try:
-            X = np.array(feat[-min(200, len(feat)):])
+            X = np.array(self._hmm_features[-min(200, len(self._hmm_features)):])
             proba = self._hmm.predict_proba(X)
             cur   = int(np.argmax(proba[-1]))
             return cur, float(proba[-1, cur])
@@ -216,23 +249,44 @@ def _compute_hurst(prices: np.ndarray, n_scales: int = 8) -> float:
 
 
 def _classify_state(
-    vol_regime: str, hurst: float, hmm_state: int, hmm_conf: float
+    vol_regime: str, hurst: float, hmm_state: int, hmm_conf: float,
+    trend_pct: float = 0.0,
 ) -> RegimeState:
+    """
+    Classify market regime using volatility, Hurst exponent, and price trend.
+
+    trend_pct is the % price change over the most recent 25% of the window.
+    This gives BULL/BEAR classification even when hmmlearn is unavailable,
+    preventing the prior SIDEWAYS-only collapse that occurred with HMM off.
+    """
+    TREND_UP   =  0.003   # +0.3% sustained move = trending up
+    TREND_DOWN = -0.003   # -0.3% sustained move = trending down
+
     if vol_regime == "crisis":
         return RegimeState.CRISIS
+
+    trending_up   = trend_pct >  TREND_UP
+    trending_down = trend_pct <  TREND_DOWN
+
     if vol_regime == "high":
-        # High vol + anti-persistent → bear crash
+        # High-vol + anti-persistent = bear crash / whipsaw
         if hurst < 0.42:
+            return RegimeState.BEAR if trending_down else RegimeState.SIDEWAYS
+        # High-vol + persistent: follow price direction
+        if trending_up:
+            return RegimeState.BULL
+        if trending_down:
             return RegimeState.BEAR
-        # High vol + persistent → trending (could be bull or bear)
-        if hurst > 0.58 and hmm_conf > 0.6:
-            return RegimeState.BULL if hmm_state == 2 else RegimeState.BEAR
         return RegimeState.SIDEWAYS
-    # Normal / low vol
-    if hurst > 0.55:
-        return RegimeState.BULL if hmm_state != 0 else RegimeState.SIDEWAYS
+
+    # Normal / low vol — use trend + Hurst together
+    if trending_up and hurst >= 0.48:
+        return RegimeState.BULL
+    if trending_down and hurst >= 0.45:
+        return RegimeState.BEAR
     if hurst < 0.45:
-        return RegimeState.SIDEWAYS   # mean-reverting → stat arb zone
+        return RegimeState.SIDEWAYS   # mean-reverting, stat arb zone
+    # Flat price, mid Hurst — genuinely sideways
     return RegimeState.SIDEWAYS
 
 

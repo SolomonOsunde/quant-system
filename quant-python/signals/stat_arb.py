@@ -70,23 +70,32 @@ class StatArbEngine:
     MIN_HALF_LIFE = 30        # ticks (~15 seconds) — faster than this is noise
     MAX_HALF_LIFE = 100_000   # ticks (~14h at 2t/s) — too slow to trade
 
-    # Pairs: (X, Y) where spread = log(Y) - α - β·log(X)
-    PAIRS = [
-        ("BTC/USD", "ETH/USD"),
-        ("ETH/USD", "SOL/USD"),
-        ("BTC/USD", "SOL/USD"),
-        ("DOGE/USD", "XRP/USD"),
-        ("LINK/USD", "ETH/USD"),
-    ]
-
     COINT_RETEST_INTERVAL = 5_000   # update ticks between cointegration re-tests
 
-    def __init__(self):
+    def __init__(self, pairs: list[tuple[str, str]] | None = None):
         self._states:         dict[str, KalmanState]  = {}
         self._spreads:        dict[str, list[float]]  = {}
         self._coint:          dict[str, bool]         = {}
         self._coint_pval:     dict[str, float]        = {}
         self._update_counts:  dict[str, int]          = {}
+        self.pairs: list[tuple[str, str]] = []
+        if pairs is not None:
+            self.pairs = list(pairs)
+        else:
+            self.refresh_pairs()
+
+    def refresh_pairs(self):
+        """Reload enabled pairs from Postgres."""
+        try:
+            from db.instruments import load_stat_arb_pairs
+            self.pairs = list(load_stat_arb_pairs())
+        except Exception as e:
+            logger.error("Could not load stat_arb_pairs from DB: {}", e)
+            self.pairs = []
+        if not self.pairs:
+            logger.warning("No enabled stat-arb pairs — SA idle until DB is seeded")
+        else:
+            logger.info("StatArb using {} pair(s) from DB", len(self.pairs))
 
     # ── Public interface ────────────────────────────────────────────────
 
@@ -95,7 +104,7 @@ class StatArbEngine:
         Advance Kalman filter for all pairs that have sufficient price history.
         Call once per evaluation cycle with the latest price arrays.
         """
-        for sym1, sym2 in self.PAIRS:
+        for sym1, sym2 in self.pairs:
             if sym1 not in all_prices or sym2 not in all_prices:
                 continue
             p1_arr = all_prices[sym1]
@@ -189,7 +198,7 @@ class StatArbEngine:
     def get_all_signals(self, all_prices: dict[str, list[float]]) -> list[PairSignal]:
         """Convenience: return signals for all pairs with sufficient history."""
         signals = []
-        for sym1, sym2 in self.PAIRS:
+        for sym1, sym2 in self.pairs:
             sig = self.compute(sym1, sym2)
             if sig is not None:
                 signals.append(sig)

@@ -37,10 +37,14 @@ public class MarketDataManager {
     public void startAll() {
         log.info("Starting market data feeds...");
 
-        // Crypto-only mode — Alpaca crypto WebSocket (24/7, no market hours restriction)
         CryptoFeed cryptoFeed = new CryptoFeed(kafkaProducer, orderBookManager);
         feeds.add(cryptoFeed);
         executor.submit(cryptoFeed);
+
+        // Forex — OANDA practice/live or simulation if no keys
+        ForexFeed forexFeed = new ForexFeed(kafkaProducer, orderBookManager);
+        feeds.add(forexFeed);
+        executor.submit(forexFeed);
 
         log.info("Started {} market data feed(s).", feeds.size());
     }

@@ -6,8 +6,9 @@ import config
 
 class ClaudeReasoningEngine:
     """
-    Uses Claude API to apply contextual reasoning on top of quantitative signals.
-    Falls back to rule-based human-readable reasoning when API key is not set.
+    Uses Claude API for contextual reasoning. Falls back to rule-based logic
+    when the API key is not set. The fallback uses the full 7-factor composite
+    score as its primary confidence driver rather than tech+ML average only.
     """
 
     SYSTEM_PROMPT = """You are a senior quantitative analyst at a hedge fund.
@@ -48,17 +49,28 @@ Output format:
         ml_confidence: float,
         current_price: float,
         spread_bps: float,
+        # Extended context — all optional so old callers still work
+        composite_score: float = 0.0,
+        ofi=None,
+        regime=None,
+        mom_result=None,
+        cs_momentum: float = 0.0,
+        idio_momentum: float = 0.0,
+        ms_features: dict = None,
     ) -> dict:
         if self._client is None:
             return self._fallback_decision(
                 symbol, technical_direction, technical_confidence,
-                ml_prediction, ml_confidence, technical_signals
+                ml_prediction, ml_confidence, technical_signals,
+                composite_score=composite_score,
+                ofi=ofi,
+                regime=regime,
             )
 
         prompt = self._build_prompt(
             symbol, market, technical_signals, technical_direction,
             technical_confidence, ml_prediction, ml_confidence,
-            current_price, spread_bps
+            current_price, spread_bps, composite_score, ofi, regime,
         )
 
         try:
@@ -75,45 +87,34 @@ Output format:
 
         except json.JSONDecodeError as e:
             logger.error("Claude returned invalid JSON for {}: {}", symbol, e)
-            return self._fallback_decision(
-                symbol, technical_direction, technical_confidence,
-                ml_prediction, ml_confidence, technical_signals
-            )
         except Exception as e:
             logger.error("Claude API error for {}: {}", symbol, e)
-            return self._fallback_decision(
-                symbol, technical_direction, technical_confidence,
-                ml_prediction, ml_confidence, technical_signals
-            )
+
+        return self._fallback_decision(
+            symbol, technical_direction, technical_confidence,
+            ml_prediction, ml_confidence, technical_signals,
+            composite_score=composite_score, ofi=ofi, regime=regime,
+        )
 
     def _build_prompt(
         self, symbol, market, signals, direction, tech_conf,
-        ml_pred, ml_conf, price, spread_bps
+        ml_pred, ml_conf, price, spread_bps,
+        composite=0.0, ofi=None, regime=None,
     ) -> str:
-        dir_str = "BULLISH" if direction > 0 else ("BEARISH" if direction < 0 else "NEUTRAL")
+        dir_str  = "BULLISH" if direction > 0 else ("BEARISH" if direction < 0 else "NEUTRAL")
+        ofi_str  = f"{ofi.direction:+.2f} (conf={ofi.confidence:.2f})" if ofi else "N/A"
+        reg_str  = regime.state.name if regime else "N/A"
         return f"""Analyze this intraday trade opportunity:
 
-Symbol: {symbol}
-Market: {market}
-Current Price: {price:.6f}
-Spread: {spread_bps:.2f} bps
+Symbol: {symbol}  Market: {market}  Price: {price:.6f}  Spread: {spread_bps:.1f}bps
 
-Technical Analysis:
-- Direction: {dir_str}
-- Confidence: {tech_conf:.2f}
-- RSI: {signals.get('rsi', 'N/A')}
-- MACD histogram: {signals.get('macd_hist', 'N/A')}
-- Bollinger %B: {signals.get('bb_pct_b', 'N/A')}
-- EMA crossover: {signals.get('ema_cross', 'N/A')}
-- ATR%: {signals.get('atr_pct', 'N/A')}
-- Volume ratio: {signals.get('volume_ratio', 'N/A')}
-- Score: {signals.get('score', 'N/A')}
+Technical: {dir_str} conf={tech_conf:.2f} | RSI={signals.get('rsi','N/A')} MACD={signals.get('macd_hist','N/A')} BB%B={signals.get('bb_pct_b','N/A')} EMA_cross={signals.get('ema_cross','N/A')} ATR%={signals.get('atr_pct','N/A')} Vol_ratio={signals.get('volume_ratio','N/A')}
+ML: {"UP" if ml_pred > 0 else "DOWN"} ({ml_pred:.3f}) conf={ml_conf:.2f}
+OFI (order flow imbalance): {ofi_str}
+Regime: {reg_str}
+Composite score (7-factor ensemble): {composite:+.4f}
 
-ML Ensemble:
-- Predicted direction: {"UP" if ml_pred > 0 else "DOWN"} ({ml_pred:.4f})
-- ML confidence: {ml_conf:.2f}
-
-Should we trade this? Return JSON only."""
+Should we trade? Return JSON only."""
 
     def _fallback_decision(
         self,
@@ -123,41 +124,83 @@ Should we trade this? Return JSON only."""
         ml_pred: float,
         ml_conf: float,
         signals: dict,
+        composite_score: float = 0.0,
+        ofi=None,
+        regime=None,
     ) -> dict:
-        """Rule-based decision with rich human-readable reasoning."""
-        ml_trained = ml_conf > 0.0  # ml_conf==0.0 means model not yet trained
-        ml_dir = 1 if ml_pred > 0 else -1
+        """
+        Rule-based decision that uses the full 7-factor composite as primary driver.
 
-        if ml_trained:
-            combined_conf = (tech_conf + ml_conf) / 2
-            signals_agree = direction == ml_dir
+        Confidence breakdown:
+          55% — composite-based (all 7 signals regime-weighted)
+          30% — technical confidence
+          15% — ML confidence (zero weight until model is trained)
+
+        This produces meaningful confidence values even in a sideways market,
+        as long as multiple signals agree on direction.
+        """
+        ml_trained = ml_conf > 0.0
+        ml_dir     = 1 if ml_pred > 0 else -1
+
+        # ── Composite confidence (primary) ─────────────────────────────────────
+        # composite > 0.08 is the direction threshold; scale 0→1 over 0.08→0.38
+        abs_comp      = abs(composite_score)
+        composite_conf = min(max(abs_comp - 0.08, 0.0) / 0.30, 1.0)
+
+        # Use composite direction when composite is directional; fall back to tech
+        if abs_comp > 0.08:
+            primary_direction = 1 if composite_score > 0 else -1
         else:
-            # ML not trained yet — trust technical signal alone
-            combined_conf = tech_conf
-            signals_agree = True
+            primary_direction = direction
 
-        if signals_agree and combined_conf >= config.MIN_CONFIDENCE:
-            decision = "BUY" if direction > 0 else "SELL"
+        # ── ML contribution (only when trained and aligned) ───────────────────
+        ml_contribution = 0.0
+        if ml_trained and primary_direction != 0:
+            if ml_dir == primary_direction:
+                ml_contribution = ml_conf
+            # ML disagreement doesn't reduce confidence — ensemble already accounts for it
+
+        # ── OFI agreement bonus ────────────────────────────────────────────────
+        ofi_bonus = 0.0
+        if ofi and primary_direction != 0 and ofi.confidence > 0.3:
+            if (ofi.direction > 0) == (primary_direction > 0):
+                ofi_bonus = 0.06  # OFI confirms direction
+
+        # Regime position_scale is applied to USD size in main.py — not here
+        combined_conf = (
+            0.55 * composite_conf +
+            0.30 * tech_conf      +
+            0.15 * ml_contribution +
+            ofi_bonus
+        )
+
+        combined_conf = round(min(combined_conf, 1.0), 4)
+
+        if primary_direction != 0 and combined_conf >= config.MIN_CONFIDENCE:
+            decision = "BUY" if primary_direction > 0 else "SELL"
         else:
             decision = "HOLD"
 
         reasoning = self._build_reasoning(
-            symbol, direction, ml_pred, ml_conf, combined_conf, signals, decision
+            symbol, primary_direction, ml_pred, ml_conf,
+            combined_conf, composite_score, signals, decision,
+            regime=regime,
         )
 
         risk_flags = []
         atr_pct = signals.get("atr_pct", 0)
         if atr_pct and atr_pct > 2.0:
             risk_flags.append(f"High volatility: ATR {atr_pct:.1f}%")
-        vol_ratio = signals.get("volume_ratio", 1.0)
-        if vol_ratio and vol_ratio < 0.5:
+        if signals.get("volume_ratio", 1.0) < 0.5:
             risk_flags.append("Low volume — thin market")
-        if direction != ml_dir:
-            risk_flags.append("Technical and ML signals disagree")
+        if ml_trained and ml_dir != primary_direction:
+            risk_flags.append("ML disagrees with composite direction")
+        if regime and hasattr(regime, "state") and regime.state.name == "SIDEWAYS":
+            risk_flags.append("Sideways regime — reduced position scale")
 
         return {
             "decision":           decision,
-            "confidence":         round(combined_conf, 4),
+            "confidence":         combined_conf,
             "reasoning":          reasoning,
             "risk_flags":         risk_flags,
             "suggested_size_pct": round(combined_conf * 0.6, 2),
@@ -170,68 +213,58 @@ Should we trade this? Return JSON only."""
         ml_pred: float,
         ml_conf: float,
         combined_conf: float,
+        composite: float,
         signals: dict,
         decision: str,
+        regime=None,
     ) -> str:
         parts = []
 
         rsi = signals.get("rsi")
         if rsi is not None:
             if rsi < 25:
-                parts.append(f"RSI extremely oversold at {rsi:.1f} — strong reversal signal")
+                parts.append(f"RSI {rsi:.1f} — extremely oversold")
             elif rsi < 35:
-                parts.append(f"RSI oversold at {rsi:.1f} — bullish pressure building")
+                parts.append(f"RSI {rsi:.1f} — oversold")
             elif rsi > 75:
-                parts.append(f"RSI extremely overbought at {rsi:.1f} — reversal likely")
+                parts.append(f"RSI {rsi:.1f} — extremely overbought")
             elif rsi > 65:
-                parts.append(f"RSI overbought at {rsi:.1f} — bearish pressure building")
+                parts.append(f"RSI {rsi:.1f} — overbought")
             else:
-                parts.append(f"RSI neutral at {rsi:.1f}")
+                parts.append(f"RSI {rsi:.1f} neutral")
 
-        macd_hist = signals.get("macd_hist")
-        if macd_hist is not None:
-            if macd_hist > 0:
-                parts.append(f"MACD histogram positive ({macd_hist:+.5f}) — bullish momentum")
-            else:
-                parts.append(f"MACD histogram negative ({macd_hist:+.5f}) — bearish momentum")
+        macd = signals.get("macd_hist")
+        if macd is not None:
+            parts.append(f"MACD hist {macd:+.5f} ({'bullish' if macd > 0 else 'bearish'})")
 
         bb = signals.get("bb_pct_b")
         if bb is not None:
             if bb < 0.05:
-                parts.append("price breached lower Bollinger Band — deep oversold, mean-reversion BUY zone")
+                parts.append("BB%B <0.05 — deep oversold")
             elif bb > 0.95:
-                parts.append("price breached upper Bollinger Band — deep overbought, mean-reversion SELL zone")
-            elif bb < 0.2:
-                parts.append(f"price near lower Bollinger Band (BB%B={bb:.2f}) — oversold")
-            elif bb > 0.8:
-                parts.append(f"price near upper Bollinger Band (BB%B={bb:.2f}) — overbought")
+                parts.append("BB%B >0.95 — deep overbought")
+            elif bb < 0.20:
+                parts.append(f"BB%B {bb:.2f} — near lower band")
+            elif bb > 0.80:
+                parts.append(f"BB%B {bb:.2f} — near upper band")
 
         ema = signals.get("ema_cross")
         if ema is not None:
-            if ema > 0:
-                parts.append("EMA9 above EMA21 — short-term uptrend confirmed")
-            else:
-                parts.append("EMA9 below EMA21 — short-term downtrend confirmed")
+            parts.append(f"EMA cross {ema:+.5f} ({'uptrend' if ema > 0 else 'downtrend'})")
 
-        vol_ratio = signals.get("volume_ratio")
-        if vol_ratio is not None:
-            if vol_ratio > 2.0:
-                parts.append(f"volume {vol_ratio:.1f}x average — strong momentum confirmation")
-            elif vol_ratio > 1.3:
-                parts.append(f"volume {vol_ratio:.1f}x average — above-average activity")
+        vol = signals.get("volume_ratio")
+        if vol and vol > 1.3:
+            parts.append(f"volume {vol:.1f}x avg")
+
+        parts.append(f"composite={composite:+.3f}")
+
+        if regime:
+            parts.append(f"regime={regime.state.name} scale={regime.position_scale:.2f}")
 
         ml_dir_str = "UP" if ml_pred > 0 else "DOWN"
-        parts.append(
-            f"ML ensemble predicts {ml_dir_str} with {ml_conf:.0%} confidence"
-        )
+        parts.append(f"ML={ml_dir_str} conf={ml_conf:.0%}")
 
-        if decision in ("BUY", "SELL"):
-            action = "go LONG" if decision == "BUY" else "go SHORT"
-            parts.append(
-                f"Technical and ML signals agree — {action} "
-                f"(combined confidence {combined_conf:.0%})"
-            )
-        else:
-            parts.append("Technical and ML signals conflict or confidence too low — stand aside")
+        action = {"BUY": "LONG", "SELL": "SHORT"}.get(decision, "HOLD")
+        parts.append(f"→ {action} conf={combined_conf:.0%}")
 
-        return ". ".join(parts) + "."
+        return " | ".join(parts)

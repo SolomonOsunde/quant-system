@@ -2,6 +2,7 @@ package com.quant.ingestion;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quant.config.InstrumentRepository;
 import com.quant.kafka.QuantKafkaProducer;
 import com.quant.orderbook.OrderBookManager;
 import org.java_websocket.client.WebSocketClient;
@@ -13,23 +14,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Alpaca WebSocket feed for US equity tick data.
- * Docs: https://docs.alpaca.markets/reference/market-data-streaming
- *
- * Set ALPACA_API_KEY and ALPACA_API_SECRET in environment variables.
+ * Alpaca equity feed — symbols from DB {@code instruments} (market=EQUITY).
+ * Live-only; no simulation fallback.
  */
 public class EquityFeed extends BaseMarketFeed {
 
-    private static final String WS_URL =
-        "wss://stream.data.alpaca.markets/v2/iex";
-
-    private static final List<String> SYMBOLS = List.of(
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-        "TSLA", "META", "JPM", "GS", "SPY"
-    );
+    private static final String WS_URL = "wss://stream.data.alpaca.markets/v2/iex";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private WebSocketClient wsClient;
+    private List<String> symbols = List.of();
 
     public EquityFeed(QuantKafkaProducer producer, OrderBookManager obm) {
         super(producer, obm);
@@ -39,23 +33,24 @@ public class EquityFeed extends BaseMarketFeed {
     protected void connect() throws Exception {
         String apiKey    = System.getenv("ALPACA_API_KEY");
         String apiSecret = System.getenv("ALPACA_API_SECRET");
+        if (apiKey == null || apiKey.isEmpty() || apiSecret == null || apiSecret.isEmpty()) {
+            throw new IllegalStateException(
+                    "[EquityFeed] ALPACA credentials required — simulation removed");
+        }
 
-        if (apiKey == null || apiSecret == null) {
-            log.warn("[EquityFeed] Alpaca credentials not set. Running in simulation mode.");
-            simulateFeed();
-            return;
+        symbols = InstrumentRepository.symbols("EQUITY");
+        if (symbols.isEmpty()) {
+            throw new IllegalStateException(
+                    "[EquityFeed] No enabled EQUITY instruments in DB");
         }
 
         CountDownLatch authLatch = new CountDownLatch(1);
-
         wsClient = new WebSocketClient(new URI(WS_URL)) {
             @Override
             public void onOpen(ServerHandshake handshake) {
-                // Authenticate
-                String auth = String.format(
-                    "{\"action\":\"auth\",\"key\":\"%s\",\"secret\":\"%s\"}",
-                    apiKey, apiSecret);
-                send(auth);
+                send(String.format(
+                        "{\"action\":\"auth\",\"key\":\"%s\",\"secret\":\"%s\"}",
+                        apiKey, apiSecret));
             }
 
             @Override
@@ -64,7 +59,8 @@ public class EquityFeed extends BaseMarketFeed {
                     JsonNode arr = mapper.readTree(message);
                     for (JsonNode node : arr) {
                         String msgType = node.path("T").asText();
-                        if ("success".equals(msgType) && "authenticated".equals(node.path("msg").asText())) {
+                        if ("success".equals(msgType)
+                                && "authenticated".equals(node.path("msg").asText())) {
                             subscribeToQuotes();
                             authLatch.countDown();
                         } else if ("q".equals(msgType)) {
@@ -76,13 +72,12 @@ public class EquityFeed extends BaseMarketFeed {
                 }
             }
 
-            @Override
-            public void onClose(int code, String reason, boolean remote) {
+            @Override public void onClose(int code, String reason, boolean remote) {
                 log.warn("[EquityFeed] Closed: {}", reason);
+                authLatch.countDown();
             }
 
-            @Override
-            public void onError(Exception ex) {
+            @Override public void onError(Exception ex) {
                 log.error("[EquityFeed] Error: {}", ex.getMessage());
             }
         };
@@ -90,24 +85,22 @@ public class EquityFeed extends BaseMarketFeed {
         wsClient.connectBlocking();
         boolean authed = authLatch.await(30, TimeUnit.SECONDS);
         if (!authed || !wsClient.isOpen()) {
-            log.warn("[EquityFeed] Alpaca auth timed out or connection closed (market may be closed). Falling back to simulation.");
-            simulateFeed();
-            return;
+            throw new Exception("[EquityFeed] Alpaca auth failed (market may be closed) — no simulation");
         }
 
+        log.info("[EquityFeed] Live — {} symbols from DB", symbols.size());
         while (running.get() && wsClient.isOpen()) {
             Thread.sleep(1000);
         }
-        log.warn("[EquityFeed] Alpaca WebSocket disconnected. Falling back to simulation.");
-        simulateFeed();
+        throw new Exception("[EquityFeed] WebSocket disconnected — will retry");
     }
 
     private void subscribeToQuotes() {
         String sub = String.format(
             "{\"action\":\"subscribe\",\"quotes\":[%s]}",
-            "\"" + String.join("\",\"", SYMBOLS) + "\"");
+            "\"" + String.join("\",\"", symbols) + "\"");
         wsClient.send(sub);
-        log.info("[EquityFeed] Subscribed to quotes for {} symbols.", SYMBOLS.size());
+        log.info("[EquityFeed] Subscribed to {} symbols.", symbols.size());
     }
 
     private void handleQuote(JsonNode node) {
@@ -115,33 +108,9 @@ public class EquityFeed extends BaseMarketFeed {
         double bid    = node.path("bp").asDouble();
         double ask    = node.path("ap").asDouble();
         double bidSz  = node.path("bs").asDouble();
-
-        TickData tick = new TickData(
-            symbol, TickData.Market.EQUITY,
-            bid, ask, (bid + ask) / 2.0, bidSz, "ALPACA"
-        );
-        onTick(tick);
-    }
-
-    private void simulateFeed() throws InterruptedException {
-        log.info("[EquityFeed] Simulation mode active.");
-        double[] prices = {182.0, 375.0, 140.0, 178.0, 495.0,
-                           240.0, 350.0, 198.0, 380.0, 470.0};
-        int i = 0;
-        while (running.get()) {
-            for (String sym : SYMBOLS) {
-                double mid    = prices[i % prices.length] * (1 + (Math.random() - 0.5) * 0.001);
-                double spread = mid * 0.0001;
-                TickData tick = new TickData(
-                    sym, TickData.Market.EQUITY,
-                    mid - spread, mid + spread, mid,
-                    100 + Math.random() * 1000, "SIMULATION"
-                );
-                onTick(tick);
-                i++;
-            }
-            Thread.sleep(200);
-        }
+        if (bid <= 0 || ask <= 0) return;
+        onTick(new TickData(symbol, TickData.Market.EQUITY,
+                bid, ask, (bid + ask) / 2.0, bidSz, "ALPACA"));
     }
 
     @Override

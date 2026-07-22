@@ -2,6 +2,7 @@ package com.quant.ingestion;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quant.config.InstrumentRepository;
 import com.quant.kafka.QuantKafkaProducer;
 import com.quant.orderbook.OrderBookManager;
 import org.java_websocket.client.WebSocketClient;
@@ -13,44 +14,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Commodity feed backed by commodity-tracking ETFs via Alpaca WebSocket.
- *
- * ETF → Commodity mapping:
- *   GLD  → Gold       (replaces GC=F)
- *   USO  → Crude Oil  (replaces CL=F)
- *   SLV  → Silver     (replaces SI=F)
- *   UNG  → Natural Gas (replaces NG=F)
- *   WEAT → Wheat      (replaces ZW=F)
- *   SPY  → S&P 500    (replaces ES=F)
- *
- * Set ALPACA_API_KEY and ALPACA_API_SECRET to enable live mode.
- * Falls back to random-walk simulation when credentials are absent.
+ * Commodity ETFs via Alpaca — symbols from DB {@code instruments} (market=COMMODITY).
+ * Live-only; no simulation fallback.
  */
 public class CommodityFeed extends BaseMarketFeed {
 
-    private static final String WS_URL =
-        "wss://stream.data.alpaca.markets/v2/iex";
-
-    private static final List<String> SYMBOLS = List.of(
-        "GLD",   // Gold
-        "USO",   // Crude Oil
-        "SLV",   // Silver
-        "UNG",   // Natural Gas
-        "WEAT",  // Wheat
-        "SPY"    // S&P 500
-    );
-
-    private static final double[] BASE_PRICES = {
-        185.0,  // GLD  (~Gold)
-        73.0,   // USO  (~Crude Oil)
-        21.0,   // SLV  (~Silver)
-        5.50,   // UNG  (~Natural Gas)
-        5.80,   // WEAT (~Wheat)
-        470.0   // SPY  (~S&P 500)
-    };
+    private static final String WS_URL = "wss://stream.data.alpaca.markets/v2/iex";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private WebSocketClient wsClient;
+    private List<String> symbols = List.of();
 
     public CommodityFeed(QuantKafkaProducer producer, OrderBookManager obm) {
         super(producer, obm);
@@ -60,22 +33,24 @@ public class CommodityFeed extends BaseMarketFeed {
     protected void connect() throws Exception {
         String apiKey    = System.getenv("ALPACA_API_KEY");
         String apiSecret = System.getenv("ALPACA_API_SECRET");
+        if (apiKey == null || apiKey.isEmpty() || apiSecret == null || apiSecret.isEmpty()) {
+            throw new IllegalStateException(
+                    "[CommodityFeed] ALPACA credentials required — simulation removed");
+        }
 
-        if (apiKey == null || apiSecret == null) {
-            log.warn("[CommodityFeed] Alpaca credentials not set. Running simulation mode.");
-            simulateFeed();
-            return;
+        symbols = InstrumentRepository.symbols("COMMODITY");
+        if (symbols.isEmpty()) {
+            throw new IllegalStateException(
+                    "[CommodityFeed] No enabled COMMODITY instruments in DB");
         }
 
         CountDownLatch authLatch = new CountDownLatch(1);
-
         wsClient = new WebSocketClient(new URI(WS_URL)) {
             @Override
             public void onOpen(ServerHandshake handshake) {
-                String auth = String.format(
-                    "{\"action\":\"auth\",\"key\":\"%s\",\"secret\":\"%s\"}",
-                    apiKey, apiSecret);
-                send(auth);
+                send(String.format(
+                        "{\"action\":\"auth\",\"key\":\"%s\",\"secret\":\"%s\"}",
+                        apiKey, apiSecret));
             }
 
             @Override
@@ -84,7 +59,8 @@ public class CommodityFeed extends BaseMarketFeed {
                     JsonNode arr = mapper.readTree(message);
                     for (JsonNode node : arr) {
                         String msgType = node.path("T").asText();
-                        if ("success".equals(msgType) && "authenticated".equals(node.path("msg").asText())) {
+                        if ("success".equals(msgType)
+                                && "authenticated".equals(node.path("msg").asText())) {
                             subscribeToQuotes();
                             authLatch.countDown();
                         } else if ("q".equals(msgType)) {
@@ -96,13 +72,12 @@ public class CommodityFeed extends BaseMarketFeed {
                 }
             }
 
-            @Override
-            public void onClose(int code, String reason, boolean remote) {
+            @Override public void onClose(int code, String reason, boolean remote) {
                 log.warn("[CommodityFeed] Closed: {}", reason);
+                authLatch.countDown();
             }
 
-            @Override
-            public void onError(Exception ex) {
+            @Override public void onError(Exception ex) {
                 log.error("[CommodityFeed] Error: {}", ex.getMessage());
             }
         };
@@ -110,24 +85,22 @@ public class CommodityFeed extends BaseMarketFeed {
         wsClient.connectBlocking();
         boolean authed = authLatch.await(30, TimeUnit.SECONDS);
         if (!authed || !wsClient.isOpen()) {
-            log.warn("[CommodityFeed] Alpaca auth timed out or connection closed (market may be closed). Falling back to simulation.");
-            simulateFeed();
-            return;
+            throw new Exception("[CommodityFeed] Alpaca auth failed — no simulation");
         }
 
+        log.info("[CommodityFeed] Live — {} symbols from DB", symbols.size());
         while (running.get() && wsClient.isOpen()) {
             Thread.sleep(1000);
         }
-        log.warn("[CommodityFeed] Alpaca WebSocket disconnected. Falling back to simulation.");
-        simulateFeed();
+        throw new Exception("[CommodityFeed] WebSocket disconnected — will retry");
     }
 
     private void subscribeToQuotes() {
         String sub = String.format(
             "{\"action\":\"subscribe\",\"quotes\":[%s]}",
-            "\"" + String.join("\",\"", SYMBOLS) + "\"");
+            "\"" + String.join("\",\"", symbols) + "\"");
         wsClient.send(sub);
-        log.info("[CommodityFeed] Subscribed to quotes for {} ETF symbols.", SYMBOLS.size());
+        log.info("[CommodityFeed] Subscribed to {} ETF symbols.", symbols.size());
     }
 
     private void handleQuote(JsonNode node) {
@@ -135,34 +108,9 @@ public class CommodityFeed extends BaseMarketFeed {
         double bid    = node.path("bp").asDouble();
         double ask    = node.path("ap").asDouble();
         double bidSz  = node.path("bs").asDouble();
-
-        TickData tick = new TickData(
-            symbol, TickData.Market.COMMODITY,
-            bid, ask, (bid + ask) / 2.0, bidSz, "ALPACA"
-        );
-        onTick(tick);
-    }
-
-    private void simulateFeed() throws InterruptedException {
-        log.info("[CommodityFeed] Simulation mode active.");
-        double[] prices = BASE_PRICES.clone();
-
-        while (running.get()) {
-            for (int i = 0; i < SYMBOLS.size(); i++) {
-                // Realistic mean-reverting random walk
-                prices[i] *= (1 + (Math.random() - 0.499) * 0.0008);
-                double spread = prices[i] * 0.0002;
-
-                TickData tick = new TickData(
-                    SYMBOLS.get(i), TickData.Market.COMMODITY,
-                    prices[i] - spread, prices[i] + spread,
-                    prices[i], 10 + Math.random() * 100,
-                    "SIMULATION"
-                );
-                onTick(tick);
-            }
-            Thread.sleep(500);
-        }
+        if (bid <= 0 || ask <= 0) return;
+        onTick(new TickData(symbol, TickData.Market.COMMODITY,
+                bid, ask, (bid + ask) / 2.0, bidSz, "ALPACA"));
     }
 
     @Override

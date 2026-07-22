@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -33,6 +34,7 @@ public class QuantKafkaProducer implements AutoCloseable {
     public static final String TOPIC_ORDERBOOK  = "quant.orderbook";
     public static final String TOPIC_SIGNALS    = "quant.signals";
     public static final String TOPIC_EXECUTIONS = "quant.executions";
+    public static final String TOPIC_POSITIONS  = "quant.positions";
 
     private final KafkaProducer<String, String> producer;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -80,17 +82,44 @@ public class QuantKafkaProducer implements AutoCloseable {
 
     /**
      * Publish an execution confirmation back to Python.
+     * Qty uses 8 decimal places so fractional crypto is not truncated.
      */
     public void publishExecution(String symbol, String side, double qty,
                                   double price, String orderId) {
+        publishExecution(symbol, side, qty, price, orderId, "filled", false);
+    }
+
+    public void publishExecution(String symbol, String side, double qty,
+                                  double price, String orderId,
+                                  String status, boolean isExit) {
+        publishExecution(symbol, side, qty, price, orderId, status, isExit, 0);
+    }
+
+    public void publishExecution(String symbol, String side, double qty,
+                                  double price, String orderId,
+                                  String status, boolean isExit, double signalPrice) {
         try {
-            String json = String.format(
-                "{\"symbol\":\"%s\",\"side\":\"%s\",\"qty\":%.4f," +
-                "\"price\":%.5f,\"orderId\":\"%s\",\"ts\":%d}",
-                symbol, side, qty, price, orderId, System.currentTimeMillis());
+            String json = String.format(Locale.US,
+                "{\"symbol\":\"%s\",\"side\":\"%s\",\"qty\":%.8f,"
+                + "\"price\":%.8f,\"orderId\":\"%s\",\"status\":\"%s\","
+                + "\"isExit\":%s,\"signalPrice\":%.8f,\"ts\":%d}",
+                symbol, side, qty, price, orderId, status,
+                isExit ? "true" : "false", signalPrice, System.currentTimeMillis());
             producer.send(new ProducerRecord<>(TOPIC_EXECUTIONS, symbol, json));
+            log.debug("Published execution {} {} {} @ {} status={}", side, qty, symbol, price, status);
         } catch (Exception e) {
             log.error("Execution publish error: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Broker position snapshot — Python treats this as source of truth for live books.
+     */
+    public void publishPositions(String jsonPayload) {
+        try {
+            producer.send(new ProducerRecord<>(TOPIC_POSITIONS, "snapshot", jsonPayload));
+        } catch (Exception e) {
+            log.error("Position snapshot publish error: {}", e.getMessage());
         }
     }
 

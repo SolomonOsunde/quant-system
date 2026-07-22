@@ -98,15 +98,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # internal listener
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      # Optional broker API keys — set in .env or export before running
+      DATABASE_URL: postgresql://quant:quant123@timescaledb:5432/quantdb
+      TIMESCALE_URL: jdbc:postgresql://timescaledb:5432/quantdb
+      TIMESCALE_USER: quant
+      TIMESCALE_PASSWORD: quant123
       ALPACA_API_KEY: ${ALPACA_API_KEY:-}
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
       OANDA_API_KEY: ${OANDA_API_KEY:-}
       OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
+      OANDA_PRACTICE: ${OANDA_PRACTICE:-true}
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -122,15 +128,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # internal listener
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      DATABASE_URL: postgresql://quant:quant123@timescaledb:5432/quantdb
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PAPER_TRADING: ${PAPER_TRADING:-true}
+      ALLOW_SIMULATION: ${ALLOW_SIMULATION:-false}
+      REQUIRE_FILL_ACK: ${REQUIRE_FILL_ACK:-true}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
     ports:
-      - "8050:8050"    # Dash dashboard
+      - "8050:8050"
     volumes:
-      - ml_models:/app/models   # persist the trained ML model across restarts
+      - ml_models:/app/models
     restart: unless-stopped
 
 volumes:

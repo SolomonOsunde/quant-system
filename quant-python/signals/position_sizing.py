@@ -58,6 +58,11 @@ class KellyPositionSizer:
         """Record a completed trade for Kelly parameter estimation."""
         self._history.append({"pnl": pnl_usd, "conf": signal_confidence, "win": pnl_usd > 0})
 
+    def set_capital(self, capital_usd: float):
+        """Update live capital (e.g. from Alpaca equity snapshot)."""
+        if capital_usd and capital_usd > 0:
+            self.capital = float(capital_usd)
+
     def compute(
         self,
         confidence:    float,
@@ -65,6 +70,7 @@ class KellyPositionSizer:
         realized_vol:  float,   # annualized realized vol (decimal, e.g. 0.8 = 80%)
         spread_bps:    float,
         capital_deployed_usd: float = 0.0,
+        adv_usd:       float = 0.0,
     ) -> SizingResult:
         """
         Compute recommended USD position size.
@@ -76,6 +82,7 @@ class KellyPositionSizer:
         realized_vol        : annualized realized volatility (decimal)
         spread_bps          : current bid-ask spread in basis points
         capital_deployed_usd: existing exposure in same symbol (for concentration limit)
+        adv_usd             : estimated average daily volume in USD (market-impact)
         """
 
         # 1. Kelly fraction from signal history
@@ -96,14 +103,26 @@ class KellyPositionSizer:
 
         raw_usd    = min(kelly_usd, vol_usd, room)
         adj_usd    = raw_usd * tc_penalty
-        final_usd  = float(np.clip(
-            adj_usd,
-            self.capital * self.MIN_POSITION_PCT,
-            self.max_order_usd,
-        ))
+
+        # 6. Market-impact: shrink size when order is large vs ADV
+        if adv_usd > 0 and adj_usd > 0:
+            adj_usd *= self._impact_penalty(adj_usd, adv_usd)
+
+        # Do not force a minimum when concentration/TC already zeroed the size
+        if adj_usd <= 0 or room <= 0:
+            return SizingResult(
+                kelly_fraction   = round(kelly_f, 5),
+                half_kelly       = round(kelly_f * self.KELLY_MULTIPLIER, 5),
+                vol_target_units = round(vol_units, 6),
+                recommended_usd  = 0.0,
+                method           = "blocked",
+            )
+
+        floor = min(self.capital * self.MIN_POSITION_PCT, room, self.max_order_usd)
+        final_usd = float(np.clip(adj_usd, floor, min(self.max_order_usd, room)))
 
         method = "kelly" if kelly_usd <= vol_usd else "vol_target"
-        if adj_usd <= self.capital * self.MIN_POSITION_PCT:
+        if adj_usd <= floor:
             method = "minimum"
 
         return SizingResult(
@@ -177,3 +196,11 @@ class KellyPositionSizer:
         """
         penalty = max(0.15, 1.0 - spread_bps / 200.0)
         return float(penalty)
+
+    def _impact_penalty(self, order_usd: float, adv_usd: float) -> float:
+        """
+        Shrink size as participation rate rises.
+        ~1% ADV → ~0.67×; ~5% ADV → ~0.29×; floor 0.15.
+        """
+        part = order_usd / max(adv_usd, order_usd, 1.0)
+        return float(max(0.15, 1.0 / (1.0 + 50.0 * part)))
