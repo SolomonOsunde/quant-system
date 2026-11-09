@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from collections import deque
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from xgboost import XGBClassifier
@@ -42,8 +43,11 @@ class MLEnsembleModel:
     def __init__(self):
         self._model: Optional[Pipeline] = None
         self._sample_count = 0
-        self._feature_buffer = []
-        self._label_buffer   = []
+        # Features awaiting their forward-return label (populated by predict())
+        self._pending_features: deque = deque()
+        # Matched (feature, label) pairs ready for training (capped to avoid unbounded growth)
+        self._feature_buffer: deque = deque(maxlen=5000)
+        self._label_buffer:   deque = deque(maxlen=5000)
         self._is_trained     = False
         os.makedirs("models", exist_ok=True)
         self._load_model()
@@ -54,8 +58,8 @@ class MLEnsembleModel:
         if features is None:
             return MLPrediction(0.0, 0.0, 0)
 
-        # Buffer for online learning
-        self._feature_buffer.append(features)
+        # Stage for online learning; label arrives later via update_labels()
+        self._pending_features.append(features)
         self._sample_count += 1
 
         if not self._is_trained:
@@ -75,10 +79,16 @@ class MLEnsembleModel:
 
     def update_labels(self, future_returns: list[float]):
         """
-        Called after N bars to provide labels for buffered features.
+        Called after N evaluation cycles to supply forward-return labels.
+        Each label is paired with the oldest pending feature (FIFO) so that
+        feature and label correspond to the same evaluation instant.
         Labels: 1 if return > +0.05%, else 0.
         """
         for ret in future_returns:
+            if not self._pending_features:
+                break  # no staged feature to match — discard this label
+            feature = self._pending_features.popleft()
+            self._feature_buffer.append(feature)
             self._label_buffer.append(1 if ret > 0.0005 else 0)
 
         # Retrain periodically
@@ -120,14 +130,14 @@ class MLEnsembleModel:
 
     def _train(self):
         """Train the ensemble on buffered data."""
-        min_len = min(len(self._feature_buffer), len(self._label_buffer))
-        if min_len < self.MIN_TRAIN_SAMPLES:
+        n = len(self._feature_buffer)   # always == len(_label_buffer) by construction
+        if n < self.MIN_TRAIN_SAMPLES:
             return
 
-        X = np.array(self._feature_buffer[:min_len])
-        y = np.array(self._label_buffer[:min_len])
+        X = np.array(list(self._feature_buffer))
+        y = np.array(list(self._label_buffer))
 
-        logger.info("Training ML ensemble on {} samples...", min_len)
+        logger.info("Training ML ensemble on {} samples...", n)
 
         xgb = XGBClassifier(
             n_estimators=200, max_depth=4, learning_rate=0.05,

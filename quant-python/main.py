@@ -389,13 +389,16 @@ class QuantPythonLayer:
         if not self._redis:
             return
         try:
-            self._redis.rpush("quant:pnl_history", json.dumps(record))
-            self._redis.ltrim("quant:pnl_history", -500, -1)
-
             positions = self.portfolio.positions_snapshot(self._latest_prices)
-            self._redis.delete("quant:positions")
-            for pos in positions:
-                self._redis.hset("quant:positions", pos["symbol"], json.dumps(pos))
+            with self._redis.pipeline() as pipe:
+                pipe.rpush("quant:pnl_history", json.dumps(record))
+                pipe.ltrim("quant:pnl_history", -500, -1)
+                # delete + hset in the same pipeline so there is no gap
+                # where quant:positions is absent
+                pipe.delete("quant:positions")
+                for pos in positions:
+                    pipe.hset("quant:positions", pos["symbol"], json.dumps(pos))
+                pipe.execute()
         except Exception as e:
             logger.debug("Redis P&L sync error: {}", e)
 

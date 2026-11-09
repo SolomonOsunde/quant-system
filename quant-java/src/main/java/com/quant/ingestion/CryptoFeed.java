@@ -7,10 +7,12 @@ import com.quant.orderbook.OrderBookManager;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 
+import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Alpaca crypto WebSocket feed for real-time crypto quote data.
@@ -49,7 +51,8 @@ public class CryptoFeed extends BaseMarketFeed {
             return;
         }
 
-        CountDownLatch authLatch = new CountDownLatch(1);
+        CountDownLatch authLatch  = new CountDownLatch(1);
+        AtomicBoolean authSuccess = new AtomicBoolean(false);
 
         wsClient = new WebSocketClient(new URI(WS_URL)) {
             @Override
@@ -70,6 +73,7 @@ public class CryptoFeed extends BaseMarketFeed {
                             String msg = node.path("msg").asText();
                             log.info("[CryptoFeed] Alpaca: {}", msg);
                             if ("authenticated".equals(msg)) {
+                                authSuccess.set(true);
                                 subscribeToQuotes();
                                 authLatch.countDown();
                             }
@@ -101,19 +105,18 @@ public class CryptoFeed extends BaseMarketFeed {
         };
 
         wsClient.connectBlocking();
-        boolean authed = authLatch.await(30, TimeUnit.SECONDS);
-        if (!authed || !wsClient.isOpen()) {
-            log.warn("[CryptoFeed] Auth failed or connection closed. Falling back to simulation.");
-            simulateFeed();
-            return;
+        boolean latched = authLatch.await(30, TimeUnit.SECONDS);
+        if (!latched || !authSuccess.get()) {
+            // Throw so BaseMarketFeed.run() increments its counter and backs off before retrying
+            throw new IOException("Alpaca authentication failed — will retry");
         }
 
         log.info("[CryptoFeed] Connected to Alpaca crypto stream.");
         while (running.get() && wsClient.isOpen()) {
             Thread.sleep(1000);
         }
-        log.warn("[CryptoFeed] Disconnected. Falling back to simulation.");
-        simulateFeed();
+        // Return normally: BaseMarketFeed.run() resets its attempt counter and calls connect() again
+        log.warn("[CryptoFeed] Disconnected — base class will reconnect.");
     }
 
     private void subscribeToQuotes() {
@@ -158,7 +161,7 @@ public class CryptoFeed extends BaseMarketFeed {
         double[] prices = BASE_PRICES.clone();
         while (running.get()) {
             for (int i = 0; i < SYMBOLS.size(); i++) {
-                prices[i] *= (1 + (Math.random() - 0.499) * 0.0005);
+                prices[i] *= (1 + (Math.random() - 0.5) * 0.0005);
                 double spread = prices[i] * 0.0002;
                 TickData tick = new TickData(
                     SYMBOLS.get(i), TickData.Market.CRYPTO,

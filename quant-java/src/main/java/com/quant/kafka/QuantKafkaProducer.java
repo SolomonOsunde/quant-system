@@ -88,7 +88,12 @@ public class QuantKafkaProducer implements AutoCloseable {
                 "{\"symbol\":\"%s\",\"side\":\"%s\",\"qty\":%.4f," +
                 "\"price\":%.5f,\"orderId\":\"%s\",\"ts\":%d}",
                 symbol, side, qty, price, orderId, System.currentTimeMillis());
-            producer.send(new ProducerRecord<>(TOPIC_EXECUTIONS, symbol, json));
+            producer.send(new ProducerRecord<>(TOPIC_EXECUTIONS, symbol, json),
+                (metadata, ex) -> {
+                    if (ex != null) {
+                        log.error("Failed to publish execution for {}: {}", symbol, ex.getMessage());
+                    }
+                });
         } catch (Exception e) {
             log.error("Execution publish error: {}", e.getMessage());
         }
@@ -105,7 +110,7 @@ public class QuantKafkaProducer implements AutoCloseable {
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,   StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,  "latest");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"); // manual commitSync after processing
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG,   "100");
 
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);

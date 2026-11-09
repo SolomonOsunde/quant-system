@@ -108,6 +108,10 @@ public class ExecutionEngine {
                 for (ConsumerRecord<String, String> record : records) {
                     processSignal(record.value());
                 }
+
+                if (!records.isEmpty()) {
+                    consumer.commitSync();
+                }
             }
         } catch (Exception e) {
             log.error("Signal consumer error: {}", e.getMessage(), e);
@@ -202,8 +206,8 @@ public class ExecutionEngine {
             alpacaSymbol, wholeQty, alpacaSide, tif
         );
 
-        log.info("[ALPACA] Submitting order: symbol={} (raw={}) side={} qty={} (raw={:.4f})",
-            alpacaSymbol, symbol, alpacaSide, wholeQty, qty);
+        log.info("[ALPACA] Submitting order: symbol={} (raw={}) side={} qty={} (raw qty={})",
+            alpacaSymbol, symbol, alpacaSide, wholeQty, String.format("%.4f", qty));
 
         HttpURLConnection conn = null;
         try {

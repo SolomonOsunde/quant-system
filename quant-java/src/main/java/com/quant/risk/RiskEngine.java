@@ -28,8 +28,12 @@ public class RiskEngine {
     // State
     private final AtomicBoolean killSwitch    = new AtomicBoolean(false);
     private final AtomicInteger ordersThisMin = new AtomicInteger(0);
-    private volatile double dailyPnl          = 0.0;
-    private volatile long   minuteStart       = System.currentTimeMillis();
+    private double dailyPnl                   = 0.0;
+    private long   minuteStart                = System.currentTimeMillis();
+
+    // Locks for compound read-modify-write operations
+    private final Object pnlLock         = new Object();
+    private final Object rateLimiterLock  = new Object();
 
     private final Map<String, Double> positions = new ConcurrentHashMap<>();
 
@@ -80,16 +84,20 @@ public class RiskEngine {
             return CheckResult.REJECTED_POSITION_LIMIT;
         }
 
-        if (dailyPnl < -maxDailyLossUsd) {
-            log.error("Daily loss limit reached: ${} — all trading halted.", dailyPnl);
-            killSwitch.set(true);
-            return CheckResult.REJECTED_DAILY_LOSS;
+        synchronized (pnlLock) {
+            if (dailyPnl < -maxDailyLossUsd) {
+                log.error("Daily loss limit reached: ${} — all trading halted.", dailyPnl);
+                killSwitch.set(true);
+                return CheckResult.REJECTED_DAILY_LOSS;
+            }
         }
 
-        resetRateLimiterIfNeeded();
-        if (ordersThisMin.incrementAndGet() > maxOrdersPerMin) {
-            log.warn("Order rate limit hit ({}/min)", maxOrdersPerMin);
-            return CheckResult.REJECTED_RATE_LIMIT;
+        synchronized (rateLimiterLock) {
+            resetRateLimiterIfNeeded();
+            if (ordersThisMin.incrementAndGet() > maxOrdersPerMin) {
+                log.warn("Order rate limit hit ({}/min)", maxOrdersPerMin);
+                return CheckResult.REJECTED_RATE_LIMIT;
+            }
         }
 
         if (spreadBps > maxSpreadBps) {
@@ -106,10 +114,12 @@ public class RiskEngine {
     }
 
     public void updatePnl(double pnlDelta) {
-        dailyPnl += pnlDelta;
-        if (dailyPnl < -maxDailyLossUsd) {
-            log.error("DAILY LOSS LIMIT BREACHED: ${} — activating kill switch.", dailyPnl);
-            killSwitch.set(true);
+        synchronized (pnlLock) {
+            dailyPnl += pnlDelta;
+            if (dailyPnl < -maxDailyLossUsd) {
+                log.error("DAILY LOSS LIMIT BREACHED: ${} — activating kill switch.", dailyPnl);
+                killSwitch.set(true);
+            }
         }
     }
 
@@ -132,6 +142,6 @@ public class RiskEngine {
     }
 
     public boolean isKillSwitchActive() { return killSwitch.get(); }
-    public double  getDailyPnl()         { return dailyPnl; }
+    public double  getDailyPnl()         { synchronized (pnlLock) { return dailyPnl; } }
     public Map<String, Double> getPositions() { return positions; }
 }

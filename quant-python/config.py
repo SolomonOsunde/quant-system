@@ -34,7 +34,7 @@ LABEL_LOOKAHEAD_STEPS = 5       # evaluation cycles ahead used to compute forwar
 MAX_POSITION_USD = 50_000
 MAX_ORDER_USD    = 5_000
 MIN_SPREAD_BPS   = 0.1
-MAX_SPREAD_BPS   = 200.0   # high ceiling — commodity sim data has wide artificial spreads
+MAX_SPREAD_BPS   = 50.0    # matches Java RiskEngine limit; filters wide-spread signals at source
 
 # Paper trading
 PAPER_TRADING             = True
